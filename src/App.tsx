@@ -24,7 +24,20 @@ import {
   ChevronRight,
   Filter,
   CheckCircle2,
-  X
+  X,
+  History,
+  Tag,
+  Shield,
+  Database,
+  ArrowRightLeft,
+  Calendar,
+  Clock,
+  UserCircle,
+  Activity,
+  Download,
+  Upload,
+  RefreshCw,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -39,7 +52,9 @@ import {
   Bar,
   Cell,
   PieChart,
-  Pie
+  Pie,
+  AreaChart,
+  Area
 } from 'recharts';
 import { 
   Product, 
@@ -47,10 +62,14 @@ import {
   Transaction, 
   Category, 
   User, 
+  Role,
   InventoryLog,
-  PaymentMethod
+  PaymentMethod,
+  Ingredient,
+  Promotion,
+  ActivityLog
 } from './types';
-import { CATEGORIES, INITIAL_PRODUCTS, INITIAL_USERS } from './constants';
+import { CATEGORIES, INITIAL_PRODUCTS, INITIAL_USERS, INITIAL_INGREDIENTS, INITIAL_PROMOTIONS } from './constants';
 import { cn, formatCurrency, formatDate } from './utils';
 
 // --- Components ---
@@ -86,7 +105,7 @@ const StatCard = ({ title, value, icon: Icon, trend, color }: any) => (
       <div className={cn("p-3 rounded-xl", color)}>
         <Icon size={24} className="text-white" />
       </div>
-      {trend && (
+      {trend !== undefined && (
         <span className={cn(
           "text-xs font-medium px-2 py-1 rounded-full",
           trend > 0 ? "bg-orange-50 text-orange-600" : "bg-rose-50 text-rose-600"
@@ -103,17 +122,46 @@ const StatCard = ({ title, value, icon: Icon, trend, color }: any) => (
 // --- Main App ---
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('sales');
-  const [currentUser] = useState<User>(INITIAL_USERS[0]);
+  const [showAddProduct, setShowAddProduct] = useState(false);
+  const [showStockModal, setShowStockModal] = useState(false);
+  const [stockModalType, setStockModalType] = useState<'in' | 'out' | 'waste'>('in');
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [currentUser, setCurrentUser] = useState<User | null>(INITIAL_USERS[0]);
   const [products, setProducts] = useState<Product[]>(INITIAL_PRODUCTS);
+  const [ingredients, setIngredients] = useState<Ingredient[]>(INITIAL_INGREDIENTS);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [inventoryLogs, setInventoryLogs] = useState<InventoryLog[]>([]);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+  const [promotions] = useState<Promotion[]>(INITIAL_PROMOTIONS);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<Category | 'all'>('all');
   const [showReceipt, setShowReceipt] = useState<Transaction | null>(null);
+  const [appliedPromo, setAppliedPromo] = useState<Promotion | null>(null);
+  const [promoInput, setPromoInput] = useState('');
+  const [reportRange, setReportRange] = useState('monthly');
+  const [reportCategory, setReportCategory] = useState('all');
 
   // --- Logic ---
+
+  const switchRole = (role: Role) => {
+    const user = INITIAL_USERS.find(u => u.role === role) || INITIAL_USERS[0];
+    setCurrentUser(user);
+    logActivity('Role Switch', `Switched role to ${role}`);
+  };
+
+  const logActivity = (action: string, details: string) => {
+    if (!currentUser) return;
+    const newLog: ActivityLog = {
+      id: `ACT-${Date.now()}`,
+      userId: currentUser.id,
+      userName: currentUser.name,
+      action,
+      details,
+      timestamp: new Date().toISOString()
+    };
+    setActivityLogs(prev => [newLog, ...prev]);
+  };
 
   const addToCart = (product: Product) => {
     if (!product.available || product.stock <= 0) return;
@@ -147,20 +195,42 @@ export default function App() {
     }).filter(item => item.quantity > 0));
   };
 
-  const cartTotal = useMemo(() => {
+  const cartSubtotal = useMemo(() => {
     return cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   }, [cart]);
 
+  const cartDiscount = useMemo(() => {
+    if (!appliedPromo) return 0;
+    if (appliedPromo.discountType === 'percentage') {
+      return (cartSubtotal * appliedPromo.value) / 100;
+    }
+    return appliedPromo.value;
+  }, [cartSubtotal, appliedPromo]);
+
+  const cartTotal = Math.max(0, cartSubtotal - cartDiscount);
+
+  const applyPromoCode = () => {
+    const promo = promotions.find(p => p.code.toUpperCase() === promoInput.toUpperCase() && p.active);
+    if (promo) {
+      setAppliedPromo(promo);
+      setPromoInput('');
+    } else {
+      alert('Invalid or inactive promo code');
+    }
+  };
+
   const processOrder = (paymentMethod: PaymentMethod) => {
-    if (cart.length === 0) return;
+    if (cart.length === 0 || !currentUser) return;
 
     const newTransaction: Transaction = {
       id: `TX-${Date.now()}`,
       items: [...cart],
-      subtotal: cartTotal,
-      discount: 0,
+      subtotal: cartSubtotal,
+      discount: cartDiscount,
+      discountCode: appliedPromo?.code,
       total: cartTotal,
       paymentMethod,
+      status: 'completed',
       timestamp: new Date().toISOString(),
       cashierId: currentUser.id,
       cashierName: currentUser.name,
@@ -177,122 +247,206 @@ export default function App() {
 
     const newLogs: InventoryLog[] = cart.map(item => ({
       id: `LOG-${Date.now()}-${item.id}`,
-      productId: item.id,
-      productName: item.name,
+      itemId: item.id,
+      itemName: item.name,
       type: 'sale',
       quantity: item.quantity,
+      unit: 'pcs',
       timestamp: new Date().toISOString(),
-      reason: `Sale ${newTransaction.id}`
+      reason: `Sale ${newTransaction.id}`,
+      userId: currentUser.id
     }));
 
     setInventoryLogs(prev => [...newLogs, ...prev]);
     setTransactions(prev => [newTransaction, ...prev]);
+    logActivity('Sale', `Processed order ${newTransaction.id} for ${formatCurrency(newTransaction.total)}`);
     setCart([]);
+    setAppliedPromo(null);
     setShowReceipt(newTransaction);
   };
+
+  const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'manager';
 
   // --- Views ---
 
   const renderDashboard = () => {
     const totalSales = transactions.reduce((sum, t) => sum + t.total, 0);
+    const dailySales = totalSales * 0.15; // Simulated
+    const weeklySales = totalSales * 0.45; // Simulated
+    const monthlySales = totalSales;
+
     const lowStockItems = products.filter(p => p.stock <= p.lowStockThreshold);
+    const slowMovingItems = products.filter(p => p.salesVelocity === 'slow');
     
     const chartData = [
-      { name: 'Mon', sales: 400 },
-      { name: 'Tue', sales: 300 },
-      { name: 'Wed', sales: 600 },
-      { name: 'Thu', sales: 800 },
-      { name: 'Fri', sales: 1200 },
-      { name: 'Sat', sales: 1500 },
-      { name: 'Sun', sales: 1100 },
+      { name: 'Mon', sales: 400, forecast: 420, inventory: 90 },
+      { name: 'Tue', sales: 300, forecast: 350, inventory: 85 },
+      { name: 'Wed', sales: 600, forecast: 580, inventory: 70 },
+      { name: 'Thu', sales: 800, forecast: 850, inventory: 60 },
+      { name: 'Fri', sales: 1200, forecast: 1300, inventory: 40 },
+      { name: 'Sat', sales: 1500, forecast: 1600, inventory: 20 },
+      { name: 'Sun', sales: 1100, forecast: 1050, inventory: 15 },
     ];
 
     return (
-      <div className="space-y-6 animate-in fade-in duration-500">
+      <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">Business Overview</h1>
-            <p className="text-slate-500">Welcome back, {currentUser.name}</p>
+            <h1 className="text-2xl font-bold">Dashboard Overview</h1>
+            <p className="text-slate-500">Real-time business performance monitoring</p>
           </div>
           <div className="flex gap-2">
-            <button className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer">
-              Export Report
-            </button>
-            <button className="px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
-              View Analytics
-            </button>
+            <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 flex items-center gap-2">
+              <Clock size={16} className="text-orange-500" />
+              <span className="text-sm font-bold">Peak Hours: 6PM - 8PM</span>
+            </div>
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
           <StatCard 
-            title="Total Sales" 
-            value={formatCurrency(totalSales)} 
+            title="Daily Sales" 
+            value={formatCurrency(dailySales)} 
             icon={DollarSign} 
-            trend={12.5}
+            trend={5.2}
             color="bg-orange-500"
+            tooltip="Total sales recorded in the last 24 hours"
+          />
+          <StatCard 
+            title="Weekly Sales" 
+            value={formatCurrency(weeklySales)} 
+            icon={TrendingUp} 
+            trend={12.8}
+            color="bg-blue-500"
+            tooltip="Total sales recorded in the current week"
+          />
+          <StatCard 
+            title="Monthly Sales" 
+            value={formatCurrency(monthlySales)} 
+            icon={BarChart3} 
+            trend={18.4}
+            color="bg-violet-500"
+            tooltip="Total sales recorded in the current month"
           />
           <StatCard 
             title="Transactions" 
             value={transactions.length} 
             icon={ShoppingBag} 
             trend={8.2}
-            color="bg-blue-500"
-          />
-          <StatCard 
-            title="Avg. Order Value" 
-            value={formatCurrency(transactions.length ? totalSales / transactions.length : 0)} 
-            icon={TrendingUp} 
-            trend={-2.4}
-            color="bg-violet-500"
-          />
-          <StatCard 
-            title="Low Stock Alerts" 
-            value={lowStockItems.length} 
-            icon={AlertCircle} 
-            color={lowStockItems.length > 0 ? "bg-rose-500" : "bg-slate-400"}
+            color="bg-emerald-500"
+            tooltip="Number of completed orders in the selected period"
           />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold text-slate-900 mb-6">Sales Performance</h3>
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-lg font-bold">Sales Trends & Forecast</h3>
+              <div className="flex gap-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded-full bg-orange-500" />
+                  <span className="text-xs text-slate-500">Actual</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded-full bg-slate-300" />
+                  <span className="text-xs text-slate-500">Forecast</span>
+                </div>
+              </div>
+            </div>
             <div className="h-[300px]">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData}>
+                <AreaChart data={chartData}>
+                  <defs>
+                    <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#f97316" stopOpacity={0.1}/>
+                      <stop offset="95%" stopColor="#f97316" stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                   <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dy={10} />
                   <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
                   <Tooltip 
-                    contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)'}}
+                    contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff'}}
                   />
-                  <Line type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={3} dot={{r: 4, fill: '#f97316'}} activeDot={{r: 6}} />
-                </LineChart>
+                  <Area type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={3} fillOpacity={1} fill="url(#colorSales)" />
+                  <Area type="monotone" dataKey="forecast" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" fill="transparent" />
+                </AreaChart>
               </ResponsiveContainer>
             </div>
           </div>
 
           <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold text-slate-900 mb-6">Top Selling Items</h3>
+            <h3 className="text-lg font-bold mb-6">Inventory Usage Trend</h3>
+            <div className="h-[300px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
+                  <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
+                  <Tooltip 
+                    contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff'}}
+                  />
+                  <Bar dataKey="inventory" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-lg font-bold mb-4">Top vs Slow Moving Items</h3>
             <div className="space-y-4">
-              {products.slice(0, 4).map((p, i) => (
-                <div key={p.id} className="flex items-center gap-4">
-                  <img src={p.image} alt={p.name} className="w-12 h-12 rounded-xl object-cover" />
-                  <div className="flex-1">
-                    <h4 className="text-sm font-bold text-slate-900">{p.name}</h4>
-                    <p className="text-xs text-slate-500">{p.category}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm font-bold text-slate-900">{Math.floor(Math.random() * 100) + 50} sold</p>
-                    <div className="w-24 h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
-                      <div 
-                        className="h-full bg-orange-500 rounded-full" 
-                        style={{ width: `${80 - i * 15}%` }}
-                      />
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-3">
+                  <p className="text-xs font-bold text-emerald-600 uppercase tracking-wider">Top Selling</p>
+                  {products.filter(p => p.salesVelocity === 'fast').slice(0, 3).map(p => (
+                    <div key={p.id} className="flex items-center gap-3 p-2 bg-emerald-50 rounded-xl border border-emerald-100">
+                      <img src={p.image} className="w-8 h-8 rounded-lg object-cover" />
+                      <span className="text-xs font-bold truncate">{p.name}</span>
                     </div>
-                  </div>
+                  ))}
                 </div>
-              ))}
+                <div className="space-y-3">
+                  <p className="text-xs font-bold text-rose-600 uppercase tracking-wider">Slow Moving</p>
+                  {slowMovingItems.map(p => (
+                    <div key={p.id} className="flex items-center gap-3 p-2 bg-rose-50 rounded-xl border border-rose-100">
+                      <img src={p.image} className="w-8 h-8 rounded-lg object-cover" />
+                      <span className="text-xs font-bold truncate">{p.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-orange-50 text-orange-900 p-6 rounded-2xl border border-orange-100 relative overflow-hidden">
+            <div className="relative z-10">
+              <h3 className="text-lg font-bold mb-2">Predictive & Prescriptive Insights</h3>
+              <p className="text-orange-800 text-sm mb-6 opacity-80">AI recommendations based on historical data</p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-3 bg-white rounded-xl border border-orange-200">
+                  <p className="text-xs font-bold text-orange-600 mb-1">Stock Reorder Alert</p>
+                  <p className="text-sm font-bold">Reorder 100kg Potatoes</p>
+                  <p className="text-[10px] text-orange-700 opacity-70">Demand predicted to spike by 25% this weekend.</p>
+                </div>
+                <div className="p-3 bg-white rounded-xl border border-orange-200">
+                  <p className="text-xs font-bold text-orange-600 mb-1">Promo Recommendation</p>
+                  <p className="text-sm font-bold">Bundle Truffle Fries</p>
+                  <p className="text-[10px] text-orange-700 opacity-70">Slow sales detected. Suggest 15% discount bundle.</p>
+                </div>
+                <div className="p-3 bg-white rounded-xl border border-orange-200">
+                  <p className="text-xs font-bold text-orange-600 mb-1">Prep Quantity</p>
+                  <p className="text-sm font-bold">Prep 60L Cheese Sauce</p>
+                  <p className="text-[10px] text-orange-700 opacity-70">Expected high demand for Cheese Overload.</p>
+                </div>
+                <div className="p-3 bg-white rounded-xl border border-orange-200">
+                  <p className="text-xs font-bold text-orange-600 mb-1">Profit Optimization</p>
+                  <p className="text-sm font-bold">Focus on Combos</p>
+                  <p className="text-[10px] text-orange-700 opacity-70">Combos have 45% higher margin than single items.</p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -380,13 +534,6 @@ export default function App() {
                     {product.stock} left
                   </span>
                 </div>
-                {(!product.available || product.stock <= 0) && (
-                  <div className="absolute inset-0 bg-white/60 flex items-center justify-center">
-                    <span className="bg-slate-900 text-white text-[10px] font-bold px-2 py-1 rounded-full uppercase tracking-wider">
-                      Out of Stock
-                    </span>
-                  </div>
-                )}
               </motion.div>
             ))}
           </div>
@@ -452,10 +599,44 @@ export default function App() {
 
           <div className="p-6 bg-slate-50/50 space-y-4">
             <div className="space-y-2">
-              <div className="flex justify-between text-sm text-slate-500">
-                <span>Subtotal</span>
-                <span>{formatCurrency(cartTotal)}</span>
+              <div className="flex items-center gap-2">
+                <input 
+                  type="text" 
+                  placeholder="Promo Code" 
+                  className="flex-1 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                  value={promoInput}
+                  onChange={(e) => setPromoInput(e.target.value)}
+                />
+                <button 
+                  onClick={applyPromoCode}
+                  className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all cursor-pointer"
+                >
+                  Apply
+                </button>
               </div>
+
+              {appliedPromo && (
+                <div className="flex justify-between items-center p-2 bg-orange-50 rounded-lg border border-orange-100">
+                  <div className="flex items-center gap-2">
+                    <Tag size={14} className="text-orange-600" />
+                    <span className="text-xs font-bold text-orange-900">{appliedPromo.code}</span>
+                  </div>
+                  <button onClick={() => setAppliedPromo(null)} className="text-orange-400 hover:text-orange-600">
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
+
+              <div className="flex justify-between text-sm text-slate-500 pt-2">
+                <span>Subtotal</span>
+                <span>{formatCurrency(cartSubtotal)}</span>
+              </div>
+              {cartDiscount > 0 && (
+                <div className="flex justify-between text-sm text-rose-500">
+                  <span>Discount</span>
+                  <span>-{formatCurrency(cartDiscount)}</span>
+                </div>
+              )}
               <div className="flex justify-between text-sm text-slate-500">
                 <span>Tax (10%)</span>
                 <span>{formatCurrency(cartTotal * 0.1)}</span>
@@ -493,16 +674,25 @@ export default function App() {
   };
 
   const renderProducts = () => (
-    <div className="space-y-6 animate-in fade-in duration-500">
+    <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Product Management</h1>
-          <p className="text-slate-500">Manage your menu and pricing</p>
+          <h1 className="text-2xl font-bold">Product Management</h1>
+          <p className="text-slate-500">Manage your menu, combos, and pricing</p>
         </div>
-        <button className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
-          <Plus size={18} />
-          Add New Product
-        </button>
+        <div className="flex gap-2">
+          <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
+            <Tag size={18} />
+            Manage Promos
+          </button>
+          <button 
+            onClick={() => setShowAddProduct(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer"
+          >
+            <Plus size={18} />
+            Add New Product
+          </button>
+        </div>
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
@@ -523,20 +713,20 @@ export default function App() {
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
                     <img src={product.image} alt="" className="w-10 h-10 rounded-lg object-cover" />
-                    <span className="font-bold text-slate-900">{product.name}</span>
+                    <span className="font-bold">{product.name}</span>
                   </div>
                 </td>
                 <td className="px-6 py-4">
-                  <span className="text-sm text-slate-600 capitalize">{product.category}</span>
+                  <span className="text-sm text-slate-500 capitalize">{product.category}</span>
                 </td>
                 <td className="px-6 py-4">
-                  <span className="text-sm font-medium text-slate-900">{formatCurrency(product.price)}</span>
+                  <span className="text-sm font-medium">{formatCurrency(product.price)}</span>
                 </td>
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-2">
                     <span className={cn(
                       "text-sm font-medium",
-                      product.stock <= product.lowStockThreshold ? "text-rose-600" : "text-slate-900"
+                      product.stock <= product.lowStockThreshold ? "text-rose-600" : ""
                     )}>
                       {product.stock}
                     </span>
@@ -554,9 +744,14 @@ export default function App() {
                   </span>
                 </td>
                 <td className="px-6 py-4 text-right">
-                  <button className="text-slate-400 hover:text-orange-600 transition-colors p-2 cursor-pointer">
-                    <Settings size={18} />
-                  </button>
+                  <div className="flex justify-end gap-2">
+                    <button className="text-slate-400 hover:text-orange-600 transition-colors p-2 cursor-pointer">
+                      <Settings size={18} />
+                    </button>
+                    <button className="text-slate-400 hover:text-rose-600 transition-colors p-2 cursor-pointer">
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -567,17 +762,25 @@ export default function App() {
   );
 
   const renderInventory = () => (
-    <div className="space-y-6 animate-in fade-in duration-500">
+    <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Inventory Tracking</h1>
-          <p className="text-slate-500">Monitor stock levels and movements</p>
+          <h1 className="text-2xl font-bold">Inventory Management</h1>
+          <p className="text-slate-500">Ingredients, packaging, and usage tracking</p>
         </div>
         <div className="flex gap-2">
-          <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer">
+          <button 
+            onClick={() => { setStockModalType('in'); setShowStockModal(true); }}
+            className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer"
+          >
+            <Plus size={18} className="text-emerald-600" />
             Stock-In
           </button>
-          <button className="flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 rounded-xl text-sm font-medium hover:bg-rose-100 transition-colors cursor-pointer">
+          <button 
+            onClick={() => { setStockModalType('waste'); setShowStockModal(true); }}
+            className="flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 rounded-xl text-sm font-medium hover:bg-rose-100 transition-colors cursor-pointer"
+          >
+            <Trash2 size={18} />
             Report Waste
           </button>
         </div>
@@ -585,60 +788,86 @@ export default function App() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold text-slate-900 mb-4">Stock Levels</h3>
-            <div className="space-y-4">
-              {products.map(p => (
-                <div key={p.id} className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="font-medium text-slate-700">{p.name}</span>
-                    <span className="text-slate-500">{p.stock} units</span>
-                  </div>
-                  <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                    <div 
-                      className={cn(
-                        "h-full rounded-full transition-all duration-500",
-                        p.stock <= p.lowStockThreshold ? "bg-rose-500" : "bg-orange-500"
-                      )}
-                      style={{ width: `${Math.min(100, (p.stock / 100) * 100)}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+              <h3 className="text-lg font-bold">Current Stock</h3>
+              <div className="flex gap-2">
+                <button className="px-3 py-1 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold">Raw</button>
+                <button className="px-3 py-1 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold">Packaging</button>
+              </div>
             </div>
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-slate-50 text-slate-500 text-[10px] font-bold uppercase tracking-wider">
+                  <th className="px-6 py-3">Item Name</th>
+                  <th className="px-6 py-3">Category</th>
+                  <th className="px-6 py-3">Stock Level</th>
+                  <th className="px-6 py-3">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {ingredients.map(item => (
+                  <tr key={item.id} className="hover:bg-slate-50/50 transition-colors">
+                    <td className="px-6 py-4 font-bold">{item.name}</td>
+                    <td className="px-6 py-4 text-sm text-slate-500 capitalize">{item.category}</td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold">{item.stock} {item.unit}</span>
+                        <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                          <div 
+                            className={cn(
+                              "h-full rounded-full",
+                              item.stock <= item.lowStockThreshold ? "bg-rose-500" : "bg-orange-500"
+                            )}
+                            style={{ width: `${Math.min(100, (item.stock / (item.lowStockThreshold * 5)) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      {item.stock <= item.lowStockThreshold ? (
+                        <span className="flex items-center gap-1 text-rose-600 text-[10px] font-bold uppercase">
+                          <AlertCircle size={12} /> Low Stock
+                        </span>
+                      ) : (
+                        <span className="text-emerald-600 text-[10px] font-bold uppercase">In Stock</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
 
         <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-          <h3 className="text-lg font-bold text-slate-900 mb-4">Recent Activity</h3>
+          <h3 className="text-lg font-bold mb-4">Inventory History</h3>
           <div className="space-y-4">
-            {inventoryLogs.length === 0 ? (
-              <p className="text-sm text-slate-400 text-center py-8">No recent activity</p>
-            ) : (
-              inventoryLogs.slice(0, 8).map(log => (
-                <div key={log.id} className="flex gap-3 pb-4 border-b border-slate-50 last:border-0">
-                  <div className={cn(
-                    "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
-                    log.type === 'sale' ? "bg-orange-50 text-orange-600" : "bg-blue-50 text-blue-600"
-                  )}>
-                    {log.type === 'sale' ? <TrendingUp size={16} /> : <Plus size={16} />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-bold text-slate-900 truncate">{log.productName}</p>
-                    <p className="text-xs text-slate-500">{log.reason}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className={cn(
-                      "text-sm font-bold",
-                      log.type === 'sale' ? "text-rose-600" : "text-orange-600"
-                    )}>
-                      {log.type === 'sale' ? '-' : '+'}{log.quantity}
-                    </p>
-                    <p className="text-[10px] text-slate-400">{new Date(log.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</p>
-                  </div>
+            {inventoryLogs.slice(0, 10).map(log => (
+              <div key={log.id} className="flex gap-3 pb-4 border-b border-slate-50 last:border-0">
+                <div className={cn(
+                  "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
+                  log.type === 'sale' ? "bg-orange-50 text-orange-600" : 
+                  log.type === 'waste' ? "bg-rose-50 text-rose-600" : "bg-blue-50 text-blue-600"
+                )}>
+                  {log.type === 'sale' ? <TrendingUp size={16} /> : 
+                   log.type === 'waste' ? <Trash2 size={16} /> : <Plus size={16} />}
                 </div>
-              ))
-            )}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-bold truncate">{log.itemName}</p>
+                  <p className="text-[10px] text-slate-500">{log.reason}</p>
+                </div>
+                <div className="text-right">
+                  <p className={cn(
+                    "text-sm font-bold",
+                    (log.type === 'sale' || log.type === 'waste') ? "text-rose-600" : "text-emerald-600"
+                  )}>
+                    {(log.type === 'sale' || log.type === 'waste') ? '-' : '+'}{log.quantity}
+                  </p>
+                  <p className="text-[10px] text-slate-400">{new Date(log.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</p>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -646,91 +875,145 @@ export default function App() {
   );
 
   const renderReports = () => {
-    const data = [
-      { name: '10am', value: 20 },
-      { name: '12pm', value: 85 },
-      { name: '2pm', value: 45 },
-      { name: '4pm', value: 60 },
-      { name: '6pm', value: 120 },
-      { name: '8pm', value: 90 },
-      { name: '10pm', value: 30 },
+    const salesData = [
+      { name: 'Week 1', sales: 4000 },
+      { name: 'Week 2', sales: 3000 },
+      { name: 'Week 3', sales: 6000 },
+      { name: 'Week 4', sales: 8000 },
+    ];
+
+    const filteredTransactions = transactions.filter(tx => {
+      if (reportCategory === 'all') return true;
+      return tx.items.some(item => item.category === reportCategory);
+    });
+
+    const breakdownData = [
+      { type: 'Fries', size: 'Medium', flavor: 'Classic', sales: 120, revenue: 300 },
+      { type: 'Fries', size: 'Large', flavor: 'Cheese', sales: 85, revenue: 297.5 },
+      { type: 'Drinks', size: 'Medium', flavor: 'None', sales: 45, revenue: 81 },
+      { type: 'Add-ons', size: 'None', flavor: 'Cheese', sales: 30, revenue: 15 },
     ];
 
     return (
-      <div className="space-y-6 animate-in fade-in duration-500">
+      <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">Analytics & Insights</h1>
-            <p className="text-slate-500">Predictive data for your business</p>
+            <h1 className="text-2xl font-bold">Reporting & Insights</h1>
+            <p className="text-slate-500">Detailed business performance and forecasts</p>
           </div>
           <div className="flex gap-2">
-            <select className="bg-white border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
-              <option>Last 7 Days</option>
-              <option>Last 30 Days</option>
-              <option>This Month</option>
-            </select>
+            <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
+              <Download size={18} />
+              Export PDF
+            </button>
+            <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
+              <Database size={18} />
+              Export Excel
+            </button>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-lg font-bold text-slate-900">Peak Hours Forecast</h3>
-              <span className="text-xs font-medium text-orange-600 bg-orange-50 px-2 py-1 rounded-full">AI Predicted</span>
+        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+          <div className="flex flex-wrap gap-4 items-end mb-6">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-400 uppercase">Date Range</label>
+              <select 
+                value={reportRange}
+                onChange={(e) => setReportRange(e.target.value)}
+                className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer"
+              >
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="custom">Custom Range</option>
+              </select>
             </div>
-            <div className="h-[250px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
-                  <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
-                  <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)'}} />
-                  <Bar dataKey="value" fill="#f97316" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
+              <select 
+                value={reportCategory}
+                onChange={(e) => setReportCategory(e.target.value)}
+                className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer"
+              >
+                <option value="all">All Categories</option>
+                <option value="fries">Fries</option>
+                <option value="drinks">Drinks</option>
+                <option value="add-ons">Add-ons</option>
+                <option value="combos">Combos</option>
+              </select>
             </div>
-            <p className="mt-4 text-sm text-slate-500">
-              <TrendingUp size={14} className="inline mr-1 text-orange-500" />
-              Expect a <span className="font-bold text-slate-900">25% increase</span> in traffic between 6pm and 8pm today.
-            </p>
+            <button className="px-6 py-2 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 transition-all cursor-pointer">
+              Generate Report
+            </button>
           </div>
 
-          <div className="bg-orange-900 text-white p-6 rounded-2xl shadow-xl relative overflow-hidden">
-            <div className="relative z-10">
-              <h3 className="text-lg font-bold mb-2">Actionable Recommendations</h3>
-              <p className="text-orange-100 text-sm mb-6 opacity-80">Based on your recent sales and inventory patterns</p>
-              
-              <div className="space-y-4">
-                <div className="flex gap-3 p-3 bg-white/10 rounded-xl backdrop-blur-sm border border-white/10">
-                  <div className="w-8 h-8 rounded-lg bg-orange-500 flex items-center justify-center shrink-0">
-                    <Package size={16} />
-                  </div>
-                  <div>
-                    <p className="text-sm font-bold">Restock Classic Fries</p>
-                    <p className="text-xs text-orange-200">Sales are trending up. Current stock will last only 2 more days.</p>
-                  </div>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2">
+              <h3 className="text-lg font-bold mb-6">Revenue Breakdown</h3>
+              <div className="h-[300px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={salesData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
+                    <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
+                    <Tooltip contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff'}} />
+                    <Area type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={3} fill="#fff7ed" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            <div className="space-y-4">
+              <h3 className="text-lg font-bold mb-4">Summary</h3>
+              <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                <div className="flex justify-between items-center mb-4">
+                  <span className="text-sm text-slate-500">Refunds & Voids</span>
+                  <span className="text-sm font-bold text-rose-500">4 ($12.50)</span>
                 </div>
-                <div className="flex gap-3 p-3 bg-white/10 rounded-xl backdrop-blur-sm border border-white/10">
-                  <div className="w-8 h-8 rounded-lg bg-amber-500 flex items-center justify-center shrink-0">
-                    <TrendingUp size={16} />
-                  </div>
-                  <div>
-                    <p className="text-sm font-bold">New Combo Suggestion</p>
-                    <p className="text-xs text-orange-200">Customers often buy BBQ Fries with Orange Juice. Create a bundle!</p>
-                  </div>
+                <div className="flex justify-between items-center mb-4">
+                  <span className="text-sm text-slate-500">Discount Usage</span>
+                  <span className="text-sm font-bold text-orange-600">12 ($24.00)</span>
                 </div>
-                <div className="flex gap-3 p-3 bg-white/10 rounded-xl backdrop-blur-sm border border-white/10">
-                  <div className="w-8 h-8 rounded-lg bg-blue-500 flex items-center justify-center shrink-0">
-                    <Users size={16} />
-                  </div>
-                  <div>
-                    <p className="text-sm font-bold">Staffing Alert</p>
-                    <p className="text-xs text-orange-200">Friday peak hours (6pm-9pm) need an extra cashier based on history.</p>
-                  </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-slate-500">Avg. Order Value</span>
+                  <span className="text-sm font-bold text-slate-900">$8.45</span>
+                </div>
+              </div>
+              <div className="p-4 bg-orange-50 rounded-2xl border border-orange-100">
+                <p className="text-xs font-bold text-orange-900 mb-1">Profit Margin Analysis</p>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm font-bold text-orange-600">Overall Margin</span>
+                  <span className="text-lg font-black text-orange-600">42%</span>
                 </div>
               </div>
             </div>
-            <div className="absolute -right-12 -bottom-12 w-48 h-48 bg-orange-500/20 rounded-full blur-3xl" />
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+          <h3 className="text-lg font-bold mb-6">Detailed Product Breakdown</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-50">
+                  <th className="pb-4">Type</th>
+                  <th className="pb-4">Size</th>
+                  <th className="pb-4">Flavor</th>
+                  <th className="pb-4">Qty Sold</th>
+                  <th className="pb-4 text-right">Revenue</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {breakdownData.map((row, i) => (
+                  <tr key={i} className="text-sm hover:bg-slate-50 transition-colors">
+                    <td className="py-4 font-bold">{row.type}</td>
+                    <td className="py-4 text-slate-500">{row.size}</td>
+                    <td className="py-4 text-slate-500">{row.flavor}</td>
+                    <td className="py-4">{row.sales}</td>
+                    <td className="py-4 text-right font-bold text-orange-600">{formatCurrency(row.revenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -741,8 +1024,8 @@ export default function App() {
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">User Management</h1>
-          <p className="text-slate-500">Manage staff roles and access</p>
+          <h1 className="text-2xl font-bold text-slate-900">User Management & Security</h1>
+          <p className="text-slate-500">Staff accounts, activity logs, and system security</p>
         </div>
         <button className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
           <Plus size={18} />
@@ -750,45 +1033,89 @@ export default function App() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {INITIAL_USERS.map(user => (
-          <div key={user.id} className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-all">
-            <div className="flex items-center gap-4 mb-6">
-              <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 font-bold text-lg">
-                {user.name.charAt(0)}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {INITIAL_USERS.map(user => (
+              <div key={user.id} className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+                <div className="flex items-center gap-4 mb-4">
+                  <img src={user.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
+                  <div className="flex-1">
+                    <h3 className="font-bold text-slate-900">{user.name}</h3>
+                    <p className="text-xs text-slate-500">{user.email}</p>
+                  </div>
+                  <span className={cn(
+                    "px-2 py-1 rounded-full text-[10px] font-bold uppercase",
+                    user.role === 'admin' ? "bg-violet-50 text-violet-600" : 
+                    user.role === 'manager' ? "bg-blue-50 text-blue-600" : "bg-orange-50 text-orange-600"
+                  )}>
+                    {user.role}
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Edit</button>
+                  <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Reset Pass</button>
+                </div>
               </div>
-              <div className="flex-1">
-                <h3 className="font-bold text-slate-900">{user.name}</h3>
-                <p className="text-xs text-slate-500">{user.email}</p>
-              </div>
-              <span className={cn(
-                "px-2 py-1 rounded-full text-[10px] font-bold uppercase",
-                user.role === 'admin' ? "bg-violet-50 text-violet-600" : 
-                user.role === 'manager' ? "bg-blue-50 text-blue-600" : "bg-orange-50 text-orange-600"
-              )}>
-                {user.role}
-              </span>
+            ))}
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+              <h3 className="text-lg font-bold text-slate-900">System Activity Logs</h3>
+              <button className="text-xs font-bold text-orange-600 hover:underline">View All</button>
             </div>
-            <div className="space-y-3">
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-500">Last Login</span>
-                <span className="text-slate-900 font-medium">Today, 08:45 AM</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-slate-500">Transactions Today</span>
-                <span className="text-slate-900 font-medium">24</span>
-              </div>
-            </div>
-            <div className="mt-6 pt-6 border-t border-slate-50 flex gap-2">
-              <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">
-                Edit Profile
-              </button>
-              <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">
-                View Logs
-              </button>
+            <div className="p-6 space-y-4">
+              {activityLogs.slice(0, 10).map(log => (
+                <div key={log.id} className="flex gap-4 pb-4 border-b border-slate-50 last:border-0">
+                  <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 shrink-0">
+                    <Activity size={18} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-bold text-slate-900">{log.action}</p>
+                    <p className="text-xs text-slate-500">{log.details}</p>
+                    <p className="text-[10px] text-slate-400 mt-1">{log.userName} • {formatDate(log.timestamp)}</p>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
-        ))}
+        </div>
+
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-lg font-bold text-slate-900 mb-4">Security & Backup</h3>
+            <div className="space-y-4">
+              <button className="w-full flex items-center justify-between p-4 bg-slate-50 rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
+                <div className="flex items-center gap-3">
+                  <Database size={20} className="text-orange-500" />
+                  <div className="text-left">
+                    <p className="text-sm font-bold text-slate-900">Backup Records</p>
+                    <p className="text-[10px] text-slate-500">Last: 2 hours ago</p>
+                  </div>
+                </div>
+                <RefreshCw size={16} className="text-slate-400" />
+              </button>
+              <button className="w-full flex items-center justify-between p-4 bg-slate-50 rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
+                <div className="flex items-center gap-3">
+                  <Upload size={20} className="text-blue-500" />
+                  <div className="text-left">
+                    <p className="text-sm font-bold text-slate-900">Restore System</p>
+                    <p className="text-[10px] text-slate-500">From cloud storage</p>
+                  </div>
+                </div>
+                <ArrowRightLeft size={16} className="text-slate-400" />
+              </button>
+              <div className="p-4 bg-rose-50 rounded-2xl border border-rose-100">
+                <div className="flex items-center gap-3 mb-2">
+                  <Shield size={20} className="text-rose-500" />
+                  <p className="text-sm font-bold text-rose-900">Security Alert</p>
+                </div>
+                <p className="text-xs text-rose-700">2 failed login attempts detected from IP 192.168.1.45</p>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -801,7 +1128,7 @@ export default function App() {
           <div className="w-10 h-10 bg-orange-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-orange-200">
             <ShoppingBag size={24} />
           </div>
-          <span className="text-xl font-black tracking-tight text-orange-900">FRIES.POS</span>
+          <span className="text-xl font-black tracking-tight text-orange-900">SURFRIES.POS</span>
         </div>
 
         <nav className="flex-1 space-y-2">
@@ -837,26 +1164,22 @@ export default function App() {
           />
           <SidebarItem 
             icon={Users} 
-            label="Users" 
+            label="Users & Security" 
             active={activeTab === 'users'} 
             onClick={() => setActiveTab('users')} 
           />
         </nav>
 
         <div className="mt-auto pt-6 border-t border-slate-50">
-          <div className="flex items-center gap-3 mb-6 px-2">
-            <div className="w-10 h-10 rounded-full bg-orange-100 flex items-center justify-center text-orange-700 font-bold">
-              {currentUser.name.charAt(0)}
+          <div className="flex items-center gap-3 px-2">
+            <div className="w-10 h-10 rounded-full bg-orange-100 flex items-center justify-center text-orange-700 font-bold overflow-hidden">
+              <img src={currentUser?.avatar} alt="" className="w-full h-full object-cover" />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-bold text-slate-900 truncate">{currentUser.name}</p>
-              <p className="text-xs text-slate-500 capitalize">{currentUser.role}</p>
+              <p className="text-sm font-bold text-slate-900 truncate">{currentUser?.name}</p>
+              <p className="text-xs text-slate-500 capitalize">{currentUser?.role}</p>
             </div>
           </div>
-          <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-rose-500 hover:bg-rose-50 transition-all cursor-pointer">
-            <LogOut size={20} />
-            <span className="text-sm font-medium">Logout</span>
-          </button>
         </div>
       </aside>
 
@@ -872,7 +1195,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <button className="p-2 text-slate-400 hover:text-slate-900 transition-colors relative cursor-pointer">
-              <ClipboardList size={22} />
+              <AlertCircle size={22} />
               <span className="absolute top-1 right-1 w-2 h-2 bg-rose-500 rounded-full border-2 border-white" />
             </button>
             <button className="p-2 text-slate-400 hover:text-slate-900 transition-colors cursor-pointer">
@@ -930,9 +1253,15 @@ export default function App() {
                     <span>Subtotal</span>
                     <span>{formatCurrency(showReceipt.subtotal)}</span>
                   </div>
+                  {showReceipt.discount > 0 && (
+                    <div className="flex justify-between text-sm text-rose-500">
+                      <span>Discount ({showReceipt.discountCode})</span>
+                      <span>-{formatCurrency(showReceipt.discount)}</span>
+                    </div>
+                  )}
                   <div className="flex justify-between text-sm text-slate-500">
                     <span>Tax (10%)</span>
-                    <span>{formatCurrency(showReceipt.subtotal * 0.1)}</span>
+                    <span>{formatCurrency(showReceipt.total * 0.1)}</span>
                   </div>
                   <div className="flex justify-between text-xl font-bold text-slate-900 pt-2">
                     <span>Total Paid</span>
@@ -957,6 +1286,123 @@ export default function App() {
                     Print Receipt
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Add Product Modal */}
+      <AnimatePresence>
+        {showAddProduct && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-slate-100"
+            >
+              <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+                <h3 className="text-xl font-black text-slate-900">Add New Product</h3>
+                <button onClick={() => setShowAddProduct(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer">
+                  <X size={20} className="text-slate-400" />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Product Name</label>
+                  <input type="text" placeholder="e.g. Sour Cream Fries" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
+                    <select className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
+                      <option>Fries</option>
+                      <option>Drinks</option>
+                      <option>Add-ons</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Price</label>
+                    <input type="number" placeholder="0.00" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Size</label>
+                    <select className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
+                      <option>Small</option>
+                      <option>Medium</option>
+                      <option>Large</option>
+                      <option>None</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Flavor</label>
+                    <input type="text" placeholder="e.g. Cheese" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                  </div>
+                </div>
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button onClick={() => setShowAddProduct(false)} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer">Cancel</button>
+                <button onClick={() => setShowAddProduct(false)} className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 shadow-lg shadow-orange-600/20 transition-all cursor-pointer">Save Product</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Stock Transaction Modal */}
+      <AnimatePresence>
+        {showStockModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-slate-100"
+            >
+              <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+                <h3 className="text-xl font-black text-slate-900">
+                  {stockModalType === 'in' ? 'Record Stock In' : stockModalType === 'waste' ? 'Record Waste' : 'Stock Adjustment'}
+                </h3>
+                <button onClick={() => setShowStockModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer">
+                  <X size={20} className="text-slate-400" />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Ingredient / Item</label>
+                  <select className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
+                    {ingredients.map(ing => <option key={ing.id}>{ing.name}</option>)}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Quantity</label>
+                    <input type="number" placeholder="0" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Unit</label>
+                    <input type="text" disabled className="w-full bg-slate-100 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-400" value="kg" />
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Notes / Reason</label>
+                  <textarea placeholder="e.g. Monthly restock or Spoiled due to power outage" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 h-24 resize-none"></textarea>
+                </div>
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button onClick={() => setShowStockModal(false)} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer">Cancel</button>
+                <button 
+                  onClick={() => setShowStockModal(false)} 
+                  className={cn(
+                    "flex-1 py-3 text-white rounded-xl text-sm font-bold shadow-lg transition-all cursor-pointer",
+                    stockModalType === 'in' ? "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20" : "bg-rose-600 hover:bg-rose-700 shadow-rose-600/20"
+                  )}
+                >
+                  Confirm Transaction
+                </button>
               </div>
             </motion.div>
           </div>
