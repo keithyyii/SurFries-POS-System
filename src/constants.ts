@@ -115,7 +115,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     category: 'add-ons',
     size: 'none',
     flavor: 'cheese',
-    image: 'https://images.unsplash.com/photo-1528750955925-53f5892bc8b2?w=400&h=400&fit=crop',
+    image: '/src/extracheese.jpg',
     available: true,
     stock: 200,
     lowStockThreshold: 30,

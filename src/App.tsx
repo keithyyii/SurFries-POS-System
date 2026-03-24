@@ -3,16 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
-import { 
-  LayoutDashboard, 
-  ShoppingCart, 
-  Package, 
-  ClipboardList, 
-  BarChart3, 
-  Users, 
+import React, { useState, useMemo, useCallback, useRef } from 'react';
+import {
+  LayoutDashboard,
+  ShoppingCart,
+  Package,
+  ClipboardList,
+  BarChart3,
+  Users,
   Settings,
-  LogOut,
   Search,
   Plus,
   Minus,
@@ -21,96 +20,116 @@ import {
   TrendingUp,
   DollarSign,
   ShoppingBag,
-  ChevronRight,
-  Filter,
   CheckCircle2,
   X,
-  History,
   Tag,
   Shield,
   Database,
   ArrowRightLeft,
-  Calendar,
   Clock,
-  UserCircle,
   Activity,
   Download,
   Upload,
   RefreshCw,
-  Lock
+  Edit2,
+  Eye,
+  EyeOff,
+  ChevronDown,
+  Zap,
+  Lock,
+  LogOut,
+  UserCircle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  LineChart, 
-  Line, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
+import {
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
   ResponsiveContainer,
   BarChart,
   Bar,
-  Cell,
-  PieChart,
-  Pie,
   AreaChart,
-  Area
+  Area,
 } from 'recharts';
-import { 
-  Product, 
-  CartItem, 
-  Transaction, 
-  Category, 
-  User, 
+import {
+  Product,
+  CartItem,
+  Transaction,
+  Category,
+  User,
   Role,
   InventoryLog,
   PaymentMethod,
   Ingredient,
   Promotion,
-  ActivityLog
+  ActivityLog,
 } from './types';
-import { CATEGORIES, INITIAL_PRODUCTS, INITIAL_USERS, INITIAL_INGREDIENTS, INITIAL_PROMOTIONS } from './constants';
+import {
+  CATEGORIES,
+  INITIAL_PRODUCTS,
+  INITIAL_USERS,
+  INITIAL_INGREDIENTS,
+  INITIAL_PROMOTIONS,
+} from './constants';
 import { cn, formatCurrency, formatDate } from './utils';
 
-// --- Components ---
+// ─── tiny helpers ────────────────────────────────────────────────────────────
 
-const SidebarItem = ({ 
-  icon: Icon, 
-  label, 
-  active, 
-  onClick 
-}: { 
-  icon: any, 
-  label: string, 
-  active: boolean, 
-  onClick: () => void 
+const uid = (prefix = 'ID') => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+const PLACEHOLDER_IMG =
+  'https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=400&h=400&fit=crop';
+
+// ─── Sub-components ──────────────────────────────────────────────────────────
+
+const SidebarItem = ({
+  icon: Icon,
+  label,
+  active,
+  onClick,
+  badge,
+}: {
+  icon: any;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  badge?: number;
 }) => (
   <button
     onClick={onClick}
     className={cn(
-      "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer",
-      active 
-        ? "bg-orange-50 text-orange-600 font-medium shadow-sm" 
-        : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+      'w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer',
+      active
+        ? 'bg-orange-50 text-orange-600 font-medium shadow-sm'
+        : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900',
     )}
   >
     <Icon size={20} />
-    <span className="text-sm">{label}</span>
+    <span className="text-sm flex-1 text-left">{label}</span>
+    {badge !== undefined && badge > 0 && (
+      <span className="text-[10px] font-bold bg-rose-500 text-white rounded-full w-5 h-5 flex items-center justify-center">
+        {badge}
+      </span>
+    )}
   </button>
 );
 
 const StatCard = ({ title, value, icon: Icon, trend, color }: any) => (
   <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
     <div className="flex justify-between items-start mb-4">
-      <div className={cn("p-3 rounded-xl", color)}>
+      <div className={cn('p-3 rounded-xl', color)}>
         <Icon size={24} className="text-white" />
       </div>
       {trend !== undefined && (
-        <span className={cn(
-          "text-xs font-medium px-2 py-1 rounded-full",
-          trend > 0 ? "bg-orange-50 text-orange-600" : "bg-rose-50 text-rose-600"
-        )}>
-          {trend > 0 ? '+' : ''}{trend}%
+        <span
+          className={cn(
+            'text-xs font-medium px-2 py-1 rounded-full',
+            trend > 0 ? 'bg-orange-50 text-orange-600' : 'bg-rose-50 text-rose-600',
+          )}
+        >
+          {trend > 0 ? '+' : ''}
+          {trend}%
         </span>
       )}
     </div>
@@ -119,60 +138,198 @@ const StatCard = ({ title, value, icon: Icon, trend, color }: any) => (
   </div>
 );
 
-// --- Main App ---
+// ─── Login Screen ─────────────────────────────────────────────────────────────
+
+const LoginScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPass, setShowPass] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleLogin = () => {
+    const user = INITIAL_USERS.find(u => u.email === email.trim().toLowerCase());
+    if (!user) { setError('No account found with that email.'); return; }
+    // For demo: any password works; real app would verify hash
+    if (!password) { setError('Please enter your password.'); return; }
+    setError('');
+    onLogin(user);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="bg-white w-full max-w-sm rounded-3xl shadow-xl border border-slate-100 overflow-hidden"
+      >
+        <div className="p-8 border-b border-slate-50 text-center">
+          <div className="w-14 h-14 bg-orange-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-orange-200">
+            <ShoppingBag size={28} className="text-white" />
+          </div>
+          <h1 className="text-2xl font-black text-orange-900 tracking-tight">SURFRIES.POS</h1>
+          <p className="text-slate-500 text-sm mt-1">Sign in to your account</p>
+        </div>
+        <div className="p-8 space-y-4">
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-400 uppercase">Email</label>
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="you@fries.com"
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+              onKeyDown={e => e.key === 'Enter' && handleLogin()}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-400 uppercase">Password</label>
+            <div className="relative">
+              <input
+                type={showPass ? 'text' : 'password'}
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                onKeyDown={e => e.key === 'Enter' && handleLogin()}
+              />
+              <button onClick={() => setShowPass(v => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 cursor-pointer">
+                {showPass ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+          </div>
+          {error && <p className="text-rose-500 text-xs font-medium">{error}</p>}
+          <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-[11px] text-slate-500 space-y-1">
+            <p className="font-bold text-slate-600">Demo accounts (any password):</p>
+            {INITIAL_USERS.map(u => (
+              <p key={u.id} className="cursor-pointer hover:text-orange-600" onClick={() => setEmail(u.email)}>
+                {u.email} — <span className="capitalize font-medium">{u.role}</span>
+              </p>
+            ))}
+          </div>
+          <button
+            onClick={handleLogin}
+            className="w-full py-3 bg-orange-600 text-white rounded-xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-700 transition-all cursor-pointer"
+          >
+            Sign In
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [showAddProduct, setShowAddProduct] = useState(false);
-  const [showStockModal, setShowStockModal] = useState(false);
-  const [stockModalType, setStockModalType] = useState<'in' | 'out' | 'waste'>('in');
+  // Auth
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+
+  // Navigation
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [currentUser, setCurrentUser] = useState<User | null>(INITIAL_USERS[0]);
+
+  // Data
   const [products, setProducts] = useState<Product[]>(INITIAL_PRODUCTS);
   const [ingredients, setIngredients] = useState<Ingredient[]>(INITIAL_INGREDIENTS);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [inventoryLogs, setInventoryLogs] = useState<InventoryLog[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
-  const [promotions] = useState<Promotion[]>(INITIAL_PROMOTIONS);
+  const [promotions, setPromotions] = useState<Promotion[]>(INITIAL_PROMOTIONS);
+
+  // Sales UI
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<Category | 'all'>('all');
   const [showReceipt, setShowReceipt] = useState<Transaction | null>(null);
   const [appliedPromo, setAppliedPromo] = useState<Promotion | null>(null);
   const [promoInput, setPromoInput] = useState('');
+  const [promoError, setPromoError] = useState('');
+  const [selectedPayment, setSelectedPayment] = useState<PaymentMethod>('cash');
+
+  // Reports
   const [reportRange, setReportRange] = useState('monthly');
   const [reportCategory, setReportCategory] = useState('all');
 
-  // --- Logic ---
+  // Modals
+  const [showAddProduct, setShowAddProduct] = useState(false);
+  const [editProduct, setEditProduct] = useState<Product | null>(null);
+  const [showStockModal, setShowStockModal] = useState(false);
+  const [stockModalType, setStockModalType] = useState<'in' | 'out' | 'waste'>('in');
+  const [showAddUser, setShowAddUser] = useState(false);
+  const [showRoleSwitch, setShowRoleSwitch] = useState(false);
+
+  // Add Product form state
+  const [newProduct, setNewProduct] = useState({
+    name: '', category: 'fries' as Category, price: '', cost: '',
+    size: 'medium' as Product['size'], flavor: 'classic' as Product['flavor'],
+    image: '', stock: '', lowStockThreshold: '10',
+  });
+  const [productFormError, setProductFormError] = useState('');
+
+  // Stock modal form state
+  const [stockForm, setStockForm] = useState({ ingredientId: '', quantity: '', notes: '' });
+  const [stockFormError, setStockFormError] = useState('');
+
+  // Add user form state
+  const [newUser, setNewUser] = useState({ name: '', email: '', role: 'cashier' as Role });
+  const [userFormError, setUserFormError] = useState('');
+
+  // ─── Computed helpers ────────────────────────────────────────────────────
+
+  const lowStockProducts = useMemo(() => products.filter(p => p.stock <= p.lowStockThreshold), [products]);
+  const lowStockIngredients = useMemo(() => ingredients.filter(i => i.stock <= i.lowStockThreshold), [ingredients]);
+  const lowStockCount = lowStockProducts.length + lowStockIngredients.length;
+
+  const isAdmin = currentUser?.role === 'admin';
+  const isManager = currentUser?.role === 'admin' || currentUser?.role === 'manager';
+
+  // ─── Activity Logger ─────────────────────────────────────────────────────
+
+  const logActivity = useCallback((action: string, details: string, user?: User | null) => {
+    const actor = user ?? currentUser;
+    if (!actor) return;
+    const entry: ActivityLog = {
+      id: uid('ACT'),
+      userId: actor.id,
+      userName: actor.name,
+      action,
+      details,
+      timestamp: new Date().toISOString(),
+    };
+    setActivityLogs(prev => [entry, ...prev.slice(0, 199)]);
+  }, [currentUser]);
+
+  // ─── Auth ────────────────────────────────────────────────────────────────
+
+  const handleLogin = (user: User) => {
+    setCurrentUser(user);
+    logActivity('Login', `Signed in as ${user.role}`, user);
+  };
+
+  const handleLogout = () => {
+    logActivity('Logout', 'User signed out');
+    setCurrentUser(null);
+    setCart([]);
+    setActiveTab('dashboard');
+  };
 
   const switchRole = (role: Role) => {
     const user = INITIAL_USERS.find(u => u.role === role) || INITIAL_USERS[0];
     setCurrentUser(user);
-    logActivity('Role Switch', `Switched role to ${role}`);
+    logActivity('Role Switch', `Switched to ${role} role`, user);
+    setShowRoleSwitch(false);
   };
 
-  const logActivity = (action: string, details: string) => {
-    if (!currentUser) return;
-    const newLog: ActivityLog = {
-      id: `ACT-${Date.now()}`,
-      userId: currentUser.id,
-      userName: currentUser.name,
-      action,
-      details,
-      timestamp: new Date().toISOString()
-    };
-    setActivityLogs(prev => [newLog, ...prev]);
-  };
+  // ─── Cart Logic ──────────────────────────────────────────────────────────
 
   const addToCart = (product: Product) => {
     if (!product.available || product.stock <= 0) return;
-    
     setCart(prev => {
       const existing = prev.find(item => item.id === product.id);
       if (existing) {
-        return prev.map(item => 
-          item.id === product.id 
-            ? { ...item, quantity: Math.min(item.quantity + 1, product.stock) } 
-            : item
+        return prev.map(item =>
+          item.id === product.id
+            ? { ...item, quantity: Math.min(item.quantity + 1, product.stock) }
+            : item,
         );
       }
       return [...prev, { ...product, quantity: 1 }];
@@ -184,306 +341,507 @@ export default function App() {
   };
 
   const updateCartQuantity = (productId: string, delta: number) => {
-    setCart(prev => prev.map(item => {
-      if (item.id === productId) {
-        const newQty = Math.max(0, item.quantity + delta);
-        const product = products.find(p => p.id === productId);
-        if (product && newQty > product.stock) return item;
-        return { ...item, quantity: newQty };
-      }
-      return item;
-    }).filter(item => item.quantity > 0));
+    setCart(prev =>
+      prev
+        .map(item => {
+          if (item.id !== productId) return item;
+          const product = products.find(p => p.id === productId);
+          const newQty = Math.max(0, Math.min(item.quantity + delta, product?.stock ?? 999));
+          return { ...item, quantity: newQty };
+        })
+        .filter(item => item.quantity > 0),
+    );
   };
 
-  const cartSubtotal = useMemo(() => {
-    return cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  }, [cart]);
+  const cartSubtotal = useMemo(() => cart.reduce((s, i) => s + i.price * i.quantity, 0), [cart]);
 
   const cartDiscount = useMemo(() => {
     if (!appliedPromo) return 0;
-    if (appliedPromo.discountType === 'percentage') {
-      return (cartSubtotal * appliedPromo.value) / 100;
-    }
-    return appliedPromo.value;
+    return appliedPromo.discountType === 'percentage'
+      ? (cartSubtotal * appliedPromo.value) / 100
+      : appliedPromo.value;
   }, [cartSubtotal, appliedPromo]);
 
   const cartTotal = Math.max(0, cartSubtotal - cartDiscount);
 
   const applyPromoCode = () => {
-    const promo = promotions.find(p => p.code.toUpperCase() === promoInput.toUpperCase() && p.active);
+    const promo = promotions.find(
+      p => p.code.toUpperCase() === promoInput.toUpperCase() && p.active,
+    );
     if (promo) {
       setAppliedPromo(promo);
       setPromoInput('');
+      setPromoError('');
     } else {
-      alert('Invalid or inactive promo code');
+      setPromoError('Invalid or inactive promo code.');
     }
   };
 
-  const processOrder = (paymentMethod: PaymentMethod) => {
+  // ─── Process Order ───────────────────────────────────────────────────────
+
+  const processOrder = (method: PaymentMethod) => {
     if (cart.length === 0 || !currentUser) return;
 
-    const newTransaction: Transaction = {
-      id: `TX-${Date.now()}`,
+    const tx: Transaction = {
+      id: uid('TX'),
       items: [...cart],
       subtotal: cartSubtotal,
       discount: cartDiscount,
       discountCode: appliedPromo?.code,
       total: cartTotal,
-      paymentMethod,
+      paymentMethod: method,
       status: 'completed',
       timestamp: new Date().toISOString(),
       cashierId: currentUser.id,
       cashierName: currentUser.name,
     };
 
-    // Update stock and logs
-    setProducts(prev => prev.map(p => {
-      const cartItem = cart.find(item => item.id === p.id);
-      if (cartItem) {
-        return { ...p, stock: p.stock - cartItem.quantity };
-      }
-      return p;
-    }));
+    // Deduct product stock
+    setProducts(prev =>
+      prev.map(p => {
+        const ci = cart.find(c => c.id === p.id);
+        return ci ? { ...p, stock: p.stock - ci.quantity } : p;
+      }),
+    );
 
+    // Create inventory logs
     const newLogs: InventoryLog[] = cart.map(item => ({
-      id: `LOG-${Date.now()}-${item.id}`,
+      id: uid('LOG'),
       itemId: item.id,
       itemName: item.name,
       type: 'sale',
       quantity: item.quantity,
       unit: 'pcs',
       timestamp: new Date().toISOString(),
-      reason: `Sale ${newTransaction.id}`,
-      userId: currentUser.id
+      reason: `Sale ${tx.id}`,
+      userId: currentUser.id,
     }));
 
     setInventoryLogs(prev => [...newLogs, ...prev]);
-    setTransactions(prev => [newTransaction, ...prev]);
-    logActivity('Sale', `Processed order ${newTransaction.id} for ${formatCurrency(newTransaction.total)}`);
+    setTransactions(prev => [tx, ...prev]);
+    logActivity('Sale', `Processed order ${tx.id} for ${formatCurrency(tx.total)} via ${method}`);
     setCart([]);
     setAppliedPromo(null);
-    setShowReceipt(newTransaction);
+    setPromoError('');
+    setShowReceipt(tx);
   };
 
-  const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'manager';
+  // ─── Products: Add / Edit / Toggle ───────────────────────────────────────
 
-  // --- Views ---
+  const openAddProduct = () => {
+    setNewProduct({ name: '', category: 'fries', price: '', cost: '', size: 'medium', flavor: 'classic', image: '', stock: '', lowStockThreshold: '10' });
+    setProductFormError('');
+    setEditProduct(null);
+    setShowAddProduct(true);
+  };
 
-  const renderDashboard = () => {
-    const totalSales = transactions.reduce((sum, t) => sum + t.total, 0);
-    const dailySales = totalSales * 0.15; // Simulated
-    const weeklySales = totalSales * 0.45; // Simulated
-    const monthlySales = totalSales;
+  const openEditProduct = (p: Product) => {
+    setNewProduct({
+      name: p.name, category: p.category, price: String(p.price), cost: String(p.cost),
+      size: p.size, flavor: p.flavor, image: p.image || '', stock: String(p.stock),
+      lowStockThreshold: String(p.lowStockThreshold),
+    });
+    setProductFormError('');
+    setEditProduct(p);
+    setShowAddProduct(true);
+  };
 
-    const lowStockItems = products.filter(p => p.stock <= p.lowStockThreshold);
-    const slowMovingItems = products.filter(p => p.salesVelocity === 'slow');
-    
-    const chartData = [
-      { name: 'Mon', sales: 400, forecast: 420, inventory: 90 },
-      { name: 'Tue', sales: 300, forecast: 350, inventory: 85 },
-      { name: 'Wed', sales: 600, forecast: 580, inventory: 70 },
-      { name: 'Thu', sales: 800, forecast: 850, inventory: 60 },
-      { name: 'Fri', sales: 1200, forecast: 1300, inventory: 40 },
-      { name: 'Sat', sales: 1500, forecast: 1600, inventory: 20 },
-      { name: 'Sun', sales: 1100, forecast: 1050, inventory: 15 },
-    ];
+  const saveProduct = () => {
+    if (!newProduct.name.trim()) { setProductFormError('Product name is required.'); return; }
+    if (!newProduct.price || isNaN(Number(newProduct.price)) || Number(newProduct.price) < 0) { setProductFormError('Enter a valid price.'); return; }
+    if (!newProduct.stock || isNaN(Number(newProduct.stock))) { setProductFormError('Enter a valid stock quantity.'); return; }
 
-    return (
-      <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold">Dashboard Overview</h1>
-            <p className="text-slate-500">Real-time business performance monitoring</p>
+    if (editProduct) {
+      setProducts(prev => prev.map(p => p.id === editProduct.id ? {
+        ...p, name: newProduct.name.trim(), category: newProduct.category,
+        price: Number(newProduct.price), cost: Number(newProduct.cost) || 0,
+        size: newProduct.size, flavor: newProduct.flavor,
+        image: newProduct.image || PLACEHOLDER_IMG, stock: Number(newProduct.stock),
+        lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
+      } : p));
+      logActivity('Product Edit', `Updated product: ${newProduct.name}`);
+    } else {
+      const prod: Product = {
+        id: uid('PROD'), name: newProduct.name.trim(), category: newProduct.category,
+        price: Number(newProduct.price), cost: Number(newProduct.cost) || 0,
+        size: newProduct.size, flavor: newProduct.flavor,
+        image: newProduct.image || PLACEHOLDER_IMG,
+        available: true, stock: Number(newProduct.stock),
+        lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
+        salesVelocity: 'normal',
+      };
+      setProducts(prev => [...prev, prod]);
+      logActivity('Product Add', `Added new product: ${prod.name}`);
+    }
+    setShowAddProduct(false);
+  };
+
+  const deleteProduct = (id: string) => {
+    const p = products.find(pr => pr.id === id);
+    setProducts(prev => prev.filter(pr => pr.id !== id));
+    logActivity('Product Delete', `Deleted product: ${p?.name}`);
+  };
+
+  const toggleAvailability = (id: string) => {
+    setProducts(prev => prev.map(p => p.id === id ? { ...p, available: !p.available } : p));
+    const p = products.find(pr => pr.id === id);
+    logActivity('Product Toggle', `${p?.available ? 'Hidden' : 'Activated'} product: ${p?.name}`);
+  };
+
+  // ─── Inventory / Stock Modal ──────────────────────────────────────────────
+
+  const openStockModal = (type: 'in' | 'out' | 'waste') => {
+    setStockModalType(type);
+    setStockForm({ ingredientId: ingredients[0]?.id || '', quantity: '', notes: '' });
+    setStockFormError('');
+    setShowStockModal(true);
+  };
+
+  const submitStock = () => {
+    const qty = Number(stockForm.quantity);
+    if (!stockForm.ingredientId) { setStockFormError('Select an ingredient.'); return; }
+    if (!qty || qty <= 0) { setStockFormError('Enter a valid quantity.'); return; }
+
+    const ing = ingredients.find(i => i.id === stockForm.ingredientId);
+    if (!ing) return;
+
+    setIngredients(prev => prev.map(i => {
+      if (i.id !== stockForm.ingredientId) return i;
+      const newStock = stockModalType === 'in' ? i.stock + qty : Math.max(0, i.stock - qty);
+      return { ...i, stock: newStock };
+    }));
+
+    const log: InventoryLog = {
+      id: uid('LOG'),
+      itemId: ing.id, itemName: ing.name,
+      type: stockModalType === 'in' ? 'in' : stockModalType === 'waste' ? 'waste' : 'out',
+      quantity: qty, unit: ing.unit,
+      timestamp: new Date().toISOString(),
+      reason: stockForm.notes || (stockModalType === 'in' ? 'Stock replenishment' : 'Adjustment'),
+      userId: currentUser?.id || '',
+    };
+    setInventoryLogs(prev => [log, ...prev]);
+    logActivity(
+      stockModalType === 'in' ? 'Stock In' : stockModalType === 'waste' ? 'Waste Recorded' : 'Stock Out',
+      `${stockModalType === 'in' ? '+' : '-'}${qty} ${ing.unit} of ${ing.name}`,
+    );
+    setShowStockModal(false);
+  };
+
+  // ─── Users ───────────────────────────────────────────────────────────────
+
+  const [users, setUsers] = useState<User[]>(INITIAL_USERS);
+
+  const saveNewUser = () => {
+    if (!newUser.name.trim()) { setUserFormError('Name is required.'); return; }
+    if (!newUser.email.trim() || !newUser.email.includes('@')) { setUserFormError('Enter a valid email.'); return; }
+    const exists = users.find(u => u.email.toLowerCase() === newUser.email.toLowerCase());
+    if (exists) { setUserFormError('Email already in use.'); return; }
+
+    const user: User = {
+      id: uid('USR'), name: newUser.name.trim(), email: newUser.email.trim().toLowerCase(),
+      role: newUser.role, avatar: `https://i.pravatar.cc/150?u=${newUser.email}`,
+    };
+    setUsers(prev => [...prev, user]);
+    logActivity('User Add', `Added new user: ${user.name} (${user.role})`);
+    setShowAddUser(false);
+    setNewUser({ name: '', email: '', role: 'cashier' });
+    setUserFormError('');
+  };
+
+  // ─── Analytics Helpers ────────────────────────────────────────────────────
+
+  const totalRevenue = useMemo(() => transactions.reduce((s, t) => s + t.total, 0), [transactions]);
+
+  // Build last-7-days chart data from real transactions
+  const weekChartData = useMemo(() => {
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const now = new Date();
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(now);
+      d.setDate(now.getDate() - (6 - i));
+      const label = days[d.getDay()];
+      const dateStr = d.toDateString();
+      const sales = transactions
+        .filter(t => new Date(t.timestamp).toDateString() === dateStr)
+        .reduce((s, t) => s + t.total, 0);
+      // Simple forecast: sales * 1.05 + small random
+      const forecast = Math.round(sales * 1.08 + 20 * i);
+      return { name: label, sales: Math.round(sales * 100) / 100, forecast };
+    });
+  }, [transactions]);
+
+  // Hourly data for today
+  const hourlyData = useMemo(() => {
+    const today = new Date().toDateString();
+    const todayTx = transactions.filter(t => new Date(t.timestamp).toDateString() === today);
+    return Array.from({ length: 12 }, (_, i) => {
+      const hour = 8 + i; // 8am – 7pm
+      const label = hour < 12 ? `${hour}am` : hour === 12 ? '12pm' : `${hour - 12}pm`;
+      const sales = todayTx
+        .filter(t => new Date(t.timestamp).getHours() === hour)
+        .reduce((s, t) => s + t.total, 0);
+      return { name: label, sales: Math.round(sales * 100) / 100 };
+    });
+  }, [transactions]);
+
+  const topProducts = useMemo(() => {
+    const counts: Record<string, { name: string; qty: number; revenue: number }> = {};
+    transactions.forEach(tx =>
+      tx.items.forEach(item => {
+        if (!counts[item.id]) counts[item.id] = { name: item.name, qty: 0, revenue: 0 };
+        counts[item.id].qty += item.quantity;
+        counts[item.id].revenue += item.price * item.quantity;
+      }),
+    );
+    return Object.values(counts).sort((a, b) => b.qty - a.qty).slice(0, 5);
+  }, [transactions]);
+
+  const categoryBreakdown = useMemo(() => {
+    const map: Record<string, { revenue: number; qty: number }> = {};
+    transactions.forEach(tx =>
+      tx.items.forEach(item => {
+        if (!map[item.category]) map[item.category] = { revenue: 0, qty: 0 };
+        map[item.category].revenue += item.price * item.quantity;
+        map[item.category].qty += item.quantity;
+      }),
+    );
+    return Object.entries(map).map(([cat, d]) => ({
+      name: cat, revenue: Math.round(d.revenue * 100) / 100, qty: d.qty,
+    }));
+  }, [transactions]);
+
+  // Peak hour detection
+  const peakHour = useMemo(() => {
+    if (!hourlyData.length) return 'N/A';
+    const peak = hourlyData.reduce((best, h) => h.sales > best.sales ? h : best, hourlyData[0]);
+    return peak.sales > 0 ? peak.name : 'No data yet';
+  }, [hourlyData]);
+
+  // Daily / weekly / monthly totals
+  const todaySales = useMemo(() => {
+    const today = new Date().toDateString();
+    return transactions.filter(t => new Date(t.timestamp).toDateString() === today).reduce((s, t) => s + t.total, 0);
+  }, [transactions]);
+
+  const weeklySales = useMemo(() => {
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    return transactions.filter(t => new Date(t.timestamp).getTime() >= weekAgo).reduce((s, t) => s + t.total, 0);
+  }, [transactions]);
+
+  const todayTxCount = useMemo(() => {
+    const today = new Date().toDateString();
+    return transactions.filter(t => new Date(t.timestamp).toDateString() === today).length;
+  }, [transactions]);
+
+  const avgOrderValue = useMemo(() => {
+    if (!transactions.length) return 0;
+    return transactions.reduce((s, t) => s + t.total, 0) / transactions.length;
+  }, [transactions]);
+
+  // AI-style prescriptive recommendations derived from real data
+  const recommendations = useMemo(() => {
+    const recs: { title: string; body: string; color: string }[] = [];
+
+    lowStockIngredients.forEach(ing => {
+      recs.push({ title: '⚠ Reorder Alert', body: `Reorder ${ing.name} — only ${ing.stock} ${ing.unit} left (threshold: ${ing.lowStockThreshold}).`, color: 'border-rose-200' });
+    });
+
+    const slowMovers = products.filter(p => p.salesVelocity === 'slow');
+    slowMovers.forEach(p => {
+      recs.push({ title: '📉 Promo Suggestion', body: `"${p.name}" is slow-moving. Consider a 15% bundle discount.`, color: 'border-orange-200' });
+    });
+
+    const fastMovers = products.filter(p => p.salesVelocity === 'fast' && p.stock <= p.lowStockThreshold * 2);
+    fastMovers.forEach(p => {
+      recs.push({ title: '🔥 Prep Alert', body: `"${p.name}" is fast-selling with only ${p.stock} left. Prepare more!`, color: 'border-blue-200' });
+    });
+
+    if (transactions.length > 5) {
+      recs.push({ title: '📊 Profit Focus', body: 'Combos have highest margins. Suggest upselling combos during peak hours.', color: 'border-violet-200' });
+    }
+
+    if (!recs.length) {
+      recs.push({ title: '✅ All Good!', body: 'No urgent recommendations. Keep monitoring your sales and stock levels.', color: 'border-emerald-200' });
+    }
+
+    return recs.slice(0, 4);
+  }, [products, lowStockIngredients, transactions]);
+
+  // ─── Filtered report transactions ────────────────────────────────────────
+
+  const filteredTransactions = useMemo(() => {
+    const now = Date.now();
+    const ranges: Record<string, number> = {
+      daily: 24 * 60 * 60 * 1000,
+      weekly: 7 * 24 * 60 * 60 * 1000,
+      monthly: 30 * 24 * 60 * 60 * 1000,
+    };
+    const cutoff = ranges[reportRange] ? now - ranges[reportRange] : 0;
+    return transactions.filter(tx => {
+      const inTime = cutoff === 0 || new Date(tx.timestamp).getTime() >= cutoff;
+      const inCat = reportCategory === 'all' || tx.items.some(i => i.category === reportCategory);
+      return inTime && inCat;
+    });
+  }, [transactions, reportRange, reportCategory]);
+
+  const reportRevenue = filteredTransactions.reduce((s, t) => s + t.total, 0);
+  const reportDiscount = filteredTransactions.reduce((s, t) => s + t.discount, 0);
+  const reportRefunds = filteredTransactions.filter(t => t.status === 'refunded').length;
+
+  // ─── RENDER: Dashboard ───────────────────────────────────────────────────
+
+  const renderDashboard = () => (
+    <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-2xl font-bold">Dashboard Overview</h1>
+          <p className="text-slate-500">Real-time business performance monitoring</p>
+        </div>
+        <div className="flex gap-2">
+          <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 flex items-center gap-2">
+            <Clock size={16} className="text-orange-500" />
+            <span className="text-sm font-bold">Peak Hours: {peakHour}</span>
           </div>
-          <div className="flex gap-2">
-            <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 flex items-center gap-2">
-              <Clock size={16} className="text-orange-500" />
-              <span className="text-sm font-bold">Peak Hours: 6PM - 8PM</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <StatCard title="Today's Sales" value={formatCurrency(todaySales)} icon={DollarSign} trend={5.2} color="bg-orange-500" />
+        <StatCard title="Weekly Sales" value={formatCurrency(weeklySales)} icon={TrendingUp} trend={12.8} color="bg-blue-500" />
+        <StatCard title="Total Revenue" value={formatCurrency(totalRevenue)} icon={BarChart3} trend={18.4} color="bg-violet-500" />
+        <StatCard title="Transactions" value={transactions.length} icon={ShoppingBag} trend={8.2} color="bg-emerald-500" />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="text-lg font-bold">Sales Trends & Forecast (Last 7 Days)</h3>
+            <div className="flex gap-4">
+              <div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-orange-500" /><span className="text-xs text-slate-500">Actual</span></div>
+              <div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-slate-300" /><span className="text-xs text-slate-500">Forecast</span></div>
             </div>
+          </div>
+          <div className="h-[300px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={weekChartData}>
+                <defs>
+                  <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#f97316" stopOpacity={0.1} />
+                    <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} dy={10} />
+                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff' }} />
+                <Area type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={3} fillOpacity={1} fill="url(#colorSales)" />
+                <Area type="monotone" dataKey="forecast" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" fill="transparent" />
+              </AreaChart>
+            </ResponsiveContainer>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          <StatCard 
-            title="Daily Sales" 
-            value={formatCurrency(dailySales)} 
-            icon={DollarSign} 
-            trend={5.2}
-            color="bg-orange-500"
-            tooltip="Total sales recorded in the last 24 hours"
-          />
-          <StatCard 
-            title="Weekly Sales" 
-            value={formatCurrency(weeklySales)} 
-            icon={TrendingUp} 
-            trend={12.8}
-            color="bg-blue-500"
-            tooltip="Total sales recorded in the current week"
-          />
-          <StatCard 
-            title="Monthly Sales" 
-            value={formatCurrency(monthlySales)} 
-            icon={BarChart3} 
-            trend={18.4}
-            color="bg-violet-500"
-            tooltip="Total sales recorded in the current month"
-          />
-          <StatCard 
-            title="Transactions" 
-            value={transactions.length} 
-            icon={ShoppingBag} 
-            trend={8.2}
-            color="bg-emerald-500"
-            tooltip="Number of completed orders in the selected period"
-          />
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-lg font-bold">Sales Trends & Forecast</h3>
-              <div className="flex gap-4">
-                <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-full bg-orange-500" />
-                  <span className="text-xs text-slate-500">Actual</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-full bg-slate-300" />
-                  <span className="text-xs text-slate-500">Forecast</span>
-                </div>
-              </div>
-            </div>
-            <div className="h-[300px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData}>
-                  <defs>
-                    <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#f97316" stopOpacity={0.1}/>
-                      <stop offset="95%" stopColor="#f97316" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
-                  <Tooltip 
-                    contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff'}}
-                  />
-                  <Area type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={3} fillOpacity={1} fill="url(#colorSales)" />
-                  <Area type="monotone" dataKey="forecast" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" fill="transparent" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold mb-6">Inventory Usage Trend</h3>
-            <div className="h-[300px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
-                  <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
-                  <Tooltip 
-                    contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff'}}
-                  />
-                  <Bar dataKey="inventory" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+          <h3 className="text-lg font-bold mb-6">Hourly Sales Today</h3>
+          <div className="h-[300px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={hourlyData}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 10 }} />
+                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff' }} />
+                <Bar dataKey="sales" fill="#f97316" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
         </div>
+      </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold mb-4">Top vs Slow Moving Items</h3>
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-3">
-                  <p className="text-xs font-bold text-emerald-600 uppercase tracking-wider">Top Selling</p>
-                  {products.filter(p => p.salesVelocity === 'fast').slice(0, 3).map(p => (
-                    <div key={p.id} className="flex items-center gap-3 p-2 bg-emerald-50 rounded-xl border border-emerald-100">
-                      <img src={p.image} className="w-8 h-8 rounded-lg object-cover" />
-                      <span className="text-xs font-bold truncate">{p.name}</span>
-                    </div>
-                  ))}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+          <h3 className="text-lg font-bold mb-4">Top vs Slow Moving Items</h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-3">
+              <p className="text-xs font-bold text-emerald-600 uppercase tracking-wider">Top Selling</p>
+              {products.filter(p => p.salesVelocity === 'fast').slice(0, 3).map(p => (
+                <div key={p.id} className="flex items-center gap-3 p-2 bg-emerald-50 rounded-xl border border-emerald-100">
+                  <img src={p.image} className="w-8 h-8 rounded-lg object-cover" alt="" />
+                  <span className="text-xs font-bold truncate">{p.name}</span>
                 </div>
-                <div className="space-y-3">
-                  <p className="text-xs font-bold text-rose-600 uppercase tracking-wider">Slow Moving</p>
-                  {slowMovingItems.map(p => (
-                    <div key={p.id} className="flex items-center gap-3 p-2 bg-rose-50 rounded-xl border border-rose-100">
-                      <img src={p.image} className="w-8 h-8 rounded-lg object-cover" />
-                      <span className="text-xs font-bold truncate">{p.name}</span>
-                    </div>
-                  ))}
+              ))}
+            </div>
+            <div className="space-y-3">
+              <p className="text-xs font-bold text-rose-600 uppercase tracking-wider">Slow Moving</p>
+              {products.filter(p => p.salesVelocity === 'slow').map(p => (
+                <div key={p.id} className="flex items-center gap-3 p-2 bg-rose-50 rounded-xl border border-rose-100">
+                  <img src={p.image} className="w-8 h-8 rounded-lg object-cover" alt="" />
+                  <span className="text-xs font-bold truncate">{p.name}</span>
                 </div>
-              </div>
+              ))}
             </div>
           </div>
 
-          <div className="bg-orange-50 text-orange-900 p-6 rounded-2xl border border-orange-100 relative overflow-hidden">
-            <div className="relative z-10">
-              <h3 className="text-lg font-bold mb-2">Predictive & Prescriptive Insights</h3>
-              <p className="text-orange-800 text-sm mb-6 opacity-80">AI recommendations based on historical data</p>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-3 bg-white rounded-xl border border-orange-200">
-                  <p className="text-xs font-bold text-orange-600 mb-1">Stock Reorder Alert</p>
-                  <p className="text-sm font-bold">Reorder 100kg Potatoes</p>
-                  <p className="text-[10px] text-orange-700 opacity-70">Demand predicted to spike by 25% this weekend.</p>
+          {lowStockCount > 0 && (
+            <div className="mt-4 p-3 bg-rose-50 rounded-xl border border-rose-100 flex items-center gap-3">
+              <AlertCircle size={18} className="text-rose-500 shrink-0" />
+              <p className="text-xs font-bold text-rose-700">
+                {lowStockCount} low-stock alert{lowStockCount !== 1 ? 's' : ''} — check Inventory tab.
+              </p>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-orange-50 text-orange-900 p-6 rounded-2xl border border-orange-100 relative overflow-hidden">
+          <div className="relative z-10">
+            <h3 className="text-lg font-bold mb-1 flex items-center gap-2"><Zap size={18} /> Predictive & Prescriptive Insights</h3>
+            <p className="text-orange-800 text-sm mb-4 opacity-80">AI recommendations based on your live data</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {recommendations.map((r, i) => (
+                <div key={i} className={cn('p-3 bg-white rounded-xl border', r.color)}>
+                  <p className="text-xs font-bold text-orange-600 mb-1">{r.title}</p>
+                  <p className="text-xs text-orange-800">{r.body}</p>
                 </div>
-                <div className="p-3 bg-white rounded-xl border border-orange-200">
-                  <p className="text-xs font-bold text-orange-600 mb-1">Promo Recommendation</p>
-                  <p className="text-sm font-bold">Bundle Truffle Fries</p>
-                  <p className="text-[10px] text-orange-700 opacity-70">Slow sales detected. Suggest 15% discount bundle.</p>
-                </div>
-                <div className="p-3 bg-white rounded-xl border border-orange-200">
-                  <p className="text-xs font-bold text-orange-600 mb-1">Prep Quantity</p>
-                  <p className="text-sm font-bold">Prep 60L Cheese Sauce</p>
-                  <p className="text-[10px] text-orange-700 opacity-70">Expected high demand for Cheese Overload.</p>
-                </div>
-                <div className="p-3 bg-white rounded-xl border border-orange-200">
-                  <p className="text-xs font-bold text-orange-600 mb-1">Profit Optimization</p>
-                  <p className="text-sm font-bold">Focus on Combos</p>
-                  <p className="text-[10px] text-orange-700 opacity-70">Combos have 45% higher margin than single items.</p>
-                </div>
-              </div>
+              ))}
             </div>
           </div>
         </div>
       </div>
-    );
-  };
+    </div>
+  );
+
+  // ─── RENDER: Sales ────────────────────────────────────────────────────────
 
   const renderSales = () => {
-    const filteredProducts = products.filter(p => {
-      const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesCategory = activeCategory === 'all' || p.category === activeCategory;
-      return matchesSearch && matchesCategory;
+    const filtered = products.filter(p => {
+      const matchSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchCat = activeCategory === 'all' || p.category === activeCategory;
+      return matchSearch && matchCat;
     });
 
     return (
       <div className="flex h-full gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-        {/* Product Selection */}
+        {/* Product grid */}
         <div className="flex-1 flex flex-col min-w-0">
           <div className="flex flex-col gap-4 mb-6">
             <div className="relative">
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
-              <input 
-                type="text" 
-                placeholder="Search products..." 
+              <input
+                type="text"
+                placeholder="Search products..."
                 className="w-full pl-12 pr-4 py-3 bg-white border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={e => setSearchQuery(e.target.value)}
               />
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+            <div className="flex gap-2 overflow-x-auto pb-2">
               <button
                 onClick={() => setActiveCategory('all')}
                 className={cn(
-                  "px-6 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-all cursor-pointer",
-                  activeCategory === 'all' 
-                    ? "bg-orange-600 text-white shadow-md shadow-orange-200" 
-                    : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50"
+                  'px-6 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-all cursor-pointer',
+                  activeCategory === 'all'
+                    ? 'bg-orange-600 text-white shadow-md shadow-orange-200'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50',
                 )}
               >
                 All Items
@@ -493,10 +851,10 @@ export default function App() {
                   key={cat.id}
                   onClick={() => setActiveCategory(cat.id)}
                   className={cn(
-                    "px-6 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-all flex items-center gap-2 cursor-pointer",
-                    activeCategory === cat.id 
-                      ? "bg-orange-600 text-white shadow-md shadow-orange-200" 
-                      : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50"
+                    'px-6 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-all flex items-center gap-2 cursor-pointer',
+                    activeCategory === cat.id
+                      ? 'bg-orange-600 text-white shadow-md shadow-orange-200'
+                      : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50',
                   )}
                 >
                   <span>{cat.icon}</span>
@@ -507,29 +865,30 @@ export default function App() {
           </div>
 
           <div className="flex-1 overflow-y-auto pr-2 grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {filteredProducts.map(product => (
+            {filtered.map(product => (
               <motion.div
                 layout
                 key={product.id}
                 onClick={() => addToCart(product)}
                 className={cn(
-                  "group bg-white p-3 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md hover:border-orange-100 transition-all cursor-pointer relative overflow-hidden",
-                  (!product.available || product.stock <= 0) && "opacity-60 grayscale cursor-not-allowed"
+                  'group bg-white p-3 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md hover:border-orange-100 transition-all cursor-pointer relative overflow-hidden',
+                  (!product.available || product.stock <= 0) && 'opacity-60 grayscale cursor-not-allowed',
                 )}
               >
+                {product.stock <= product.lowStockThreshold && product.stock > 0 && (
+                  <div className="absolute top-2 right-2 z-10">
+                    <span className="text-[9px] bg-rose-500 text-white rounded-md px-1.5 py-0.5 font-bold">LOW</span>
+                  </div>
+                )}
                 <div className="aspect-square rounded-xl overflow-hidden mb-3">
-                  <img 
-                    src={product.image} 
-                    alt={product.name} 
-                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" 
-                  />
+                  <img src={product.image} alt={product.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
                 </div>
                 <h4 className="font-bold text-slate-900 text-sm line-clamp-1">{product.name}</h4>
                 <div className="flex justify-between items-center mt-1">
                   <span className="text-orange-600 font-bold">{formatCurrency(product.price)}</span>
                   <span className={cn(
-                    "text-[10px] px-1.5 py-0.5 rounded-md font-medium",
-                    product.stock <= product.lowStockThreshold ? "bg-rose-50 text-rose-600" : "bg-slate-50 text-slate-500"
+                    'text-[10px] px-1.5 py-0.5 rounded-md font-medium',
+                    product.stock <= product.lowStockThreshold ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500',
                   )}>
                     {product.stock} left
                   </span>
@@ -543,16 +902,14 @@ export default function App() {
         <div className="w-[380px] flex flex-col bg-white rounded-3xl border border-slate-100 shadow-xl overflow-hidden">
           <div className="p-6 border-b border-slate-50">
             <h3 className="text-xl font-bold text-slate-900">Current Order</h3>
-            <p className="text-sm text-slate-500">Table #04 • {formatDate(new Date().toISOString())}</p>
+            <p className="text-sm text-slate-500">{formatDate(new Date().toISOString())}</p>
           </div>
 
           <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
             <AnimatePresence mode="popLayout">
               {cart.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
-                  <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mb-4">
-                    <ShoppingCart size={32} />
-                  </div>
+                  <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mb-4"><ShoppingCart size={32} /></div>
                   <p className="font-medium">Your cart is empty</p>
                   <p className="text-xs">Add items to start an order</p>
                 </div>
@@ -571,26 +928,11 @@ export default function App() {
                       <p className="text-xs text-orange-600 font-medium">{formatCurrency(item.price)}</p>
                     </div>
                     <div className="flex items-center gap-2 bg-slate-50 rounded-lg p-1">
-                      <button 
-                        onClick={() => updateCartQuantity(item.id, -1)}
-                        className="w-6 h-6 flex items-center justify-center text-slate-500 hover:text-slate-900 cursor-pointer"
-                      >
-                        <Minus size={14} />
-                      </button>
+                      <button onClick={() => updateCartQuantity(item.id, -1)} className="w-6 h-6 flex items-center justify-center text-slate-500 hover:text-slate-900 cursor-pointer"><Minus size={14} /></button>
                       <span className="text-xs font-bold w-4 text-center">{item.quantity}</span>
-                      <button 
-                        onClick={() => updateCartQuantity(item.id, 1)}
-                        className="w-6 h-6 flex items-center justify-center text-slate-500 hover:text-slate-900 cursor-pointer"
-                      >
-                        <Plus size={14} />
-                      </button>
+                      <button onClick={() => updateCartQuantity(item.id, 1)} className="w-6 h-6 flex items-center justify-center text-slate-500 hover:text-slate-900 cursor-pointer"><Plus size={14} /></button>
                     </div>
-                    <button 
-                      onClick={() => removeFromCart(item.id)}
-                      className="text-slate-300 hover:text-rose-500 transition-colors cursor-pointer"
-                    >
-                      <Trash2 size={16} />
-                    </button>
+                    <button onClick={() => removeFromCart(item.id)} className="text-slate-300 hover:text-rose-500 transition-colors cursor-pointer"><Trash2 size={16} /></button>
                   </motion.div>
                 ))
               )}
@@ -600,20 +942,16 @@ export default function App() {
           <div className="p-6 bg-slate-50/50 space-y-4">
             <div className="space-y-2">
               <div className="flex items-center gap-2">
-                <input 
-                  type="text" 
-                  placeholder="Promo Code" 
+                <input
+                  type="text"
+                  placeholder="Promo Code"
                   className="flex-1 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
                   value={promoInput}
-                  onChange={(e) => setPromoInput(e.target.value)}
+                  onChange={e => { setPromoInput(e.target.value); setPromoError(''); }}
                 />
-                <button 
-                  onClick={applyPromoCode}
-                  className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all cursor-pointer"
-                >
-                  Apply
-                </button>
+                <button onClick={applyPromoCode} className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all cursor-pointer">Apply</button>
               </div>
+              {promoError && <p className="text-xs text-rose-500 font-medium">{promoError}</p>}
 
               {appliedPromo && (
                 <div className="flex justify-between items-center p-2 bg-orange-50 rounded-lg border border-orange-100">
@@ -621,39 +959,31 @@ export default function App() {
                     <Tag size={14} className="text-orange-600" />
                     <span className="text-xs font-bold text-orange-900">{appliedPromo.code}</span>
                   </div>
-                  <button onClick={() => setAppliedPromo(null)} className="text-orange-400 hover:text-orange-600">
-                    <X size={14} />
-                  </button>
+                  <button onClick={() => setAppliedPromo(null)} className="text-orange-400 hover:text-orange-600 cursor-pointer"><X size={14} /></button>
                 </div>
               )}
 
-              <div className="flex justify-between text-sm text-slate-500 pt-2">
-                <span>Subtotal</span>
-                <span>{formatCurrency(cartSubtotal)}</span>
-              </div>
-              {cartDiscount > 0 && (
-                <div className="flex justify-between text-sm text-rose-500">
-                  <span>Discount</span>
-                  <span>-{formatCurrency(cartDiscount)}</span>
-                </div>
-              )}
-              <div className="flex justify-between text-sm text-slate-500">
-                <span>Tax (10%)</span>
-                <span>{formatCurrency(cartTotal * 0.1)}</span>
-              </div>
+              <div className="flex justify-between text-sm text-slate-500 pt-2"><span>Subtotal</span><span>{formatCurrency(cartSubtotal)}</span></div>
+              {cartDiscount > 0 && <div className="flex justify-between text-sm text-rose-500"><span>Discount</span><span>-{formatCurrency(cartDiscount)}</span></div>}
+              <div className="flex justify-between text-sm text-slate-500"><span>Tax (10%)</span><span>{formatCurrency(cartTotal * 0.1)}</span></div>
               <div className="flex justify-between text-lg font-bold text-slate-900 pt-2 border-t border-slate-200">
                 <span>Total</span>
                 <span className="text-orange-600">{formatCurrency(cartTotal * 1.1)}</span>
               </div>
             </div>
 
+            {/* Payment method selector */}
             <div className="grid grid-cols-3 gap-2">
               {(['cash', 'card', 'e-wallet'] as PaymentMethod[]).map(method => (
                 <button
                   key={method}
-                  onClick={() => processOrder(method)}
-                  disabled={cart.length === 0}
-                  className="flex flex-col items-center gap-1 p-2 rounded-xl border border-slate-200 bg-white hover:border-orange-500 hover:text-orange-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  onClick={() => setSelectedPayment(method)}
+                  className={cn(
+                    'flex flex-col items-center gap-1 p-2 rounded-xl border transition-all cursor-pointer',
+                    selectedPayment === method
+                      ? 'border-orange-500 bg-orange-50 text-orange-600'
+                      : 'border-slate-200 bg-white text-slate-500 hover:border-orange-300',
+                  )}
                 >
                   <span className="text-[10px] font-bold uppercase tracking-wider">{method}</span>
                 </button>
@@ -661,17 +991,19 @@ export default function App() {
             </div>
 
             <button
-              onClick={() => processOrder('cash')}
+              onClick={() => processOrder(selectedPayment)}
               disabled={cart.length === 0}
               className="w-full py-4 bg-orange-600 text-white rounded-2xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-700 transition-all active:scale-95 disabled:opacity-50 disabled:shadow-none cursor-pointer"
             >
-              Place Order
+              Place Order · {formatCurrency(cartTotal * 1.1)}
             </button>
           </div>
         </div>
       </div>
     );
   };
+
+  // ─── RENDER: Products ─────────────────────────────────────────────────────
 
   const renderProducts = () => (
     <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
@@ -680,19 +1012,11 @@ export default function App() {
           <h1 className="text-2xl font-bold">Product Management</h1>
           <p className="text-slate-500">Manage your menu, combos, and pricing</p>
         </div>
-        <div className="flex gap-2">
-          <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
-            <Tag size={18} />
-            Manage Promos
+        {isManager && (
+          <button onClick={openAddProduct} className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
+            <Plus size={18} /> Add New Product
           </button>
-          <button 
-            onClick={() => setShowAddProduct(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer"
-          >
-            <Plus size={18} />
-            Add New Product
-          </button>
-        </div>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
@@ -702,9 +1026,10 @@ export default function App() {
               <th className="px-6 py-4">Product</th>
               <th className="px-6 py-4">Category</th>
               <th className="px-6 py-4">Price</th>
+              <th className="px-6 py-4">Cost</th>
               <th className="px-6 py-4">Stock</th>
               <th className="px-6 py-4">Status</th>
-              <th className="px-6 py-4 text-right">Actions</th>
+              {isManager && <th className="px-6 py-4 text-right">Actions</th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-50">
@@ -713,46 +1038,39 @@ export default function App() {
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
                     <img src={product.image} alt="" className="w-10 h-10 rounded-lg object-cover" />
-                    <span className="font-bold">{product.name}</span>
+                    <div>
+                      <span className="font-bold">{product.name}</span>
+                      <p className="text-xs text-slate-400 capitalize">{product.size} · {product.flavor}</p>
+                    </div>
                   </div>
                 </td>
-                <td className="px-6 py-4">
-                  <span className="text-sm text-slate-500 capitalize">{product.category}</span>
-                </td>
-                <td className="px-6 py-4">
-                  <span className="text-sm font-medium">{formatCurrency(product.price)}</span>
-                </td>
+                <td className="px-6 py-4"><span className="text-sm text-slate-500 capitalize">{product.category}</span></td>
+                <td className="px-6 py-4"><span className="text-sm font-medium">{formatCurrency(product.price)}</span></td>
+                <td className="px-6 py-4"><span className="text-sm text-slate-400">{formatCurrency(product.cost)}</span></td>
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-2">
-                    <span className={cn(
-                      "text-sm font-medium",
-                      product.stock <= product.lowStockThreshold ? "text-rose-600" : ""
-                    )}>
-                      {product.stock}
-                    </span>
-                    {product.stock <= product.lowStockThreshold && (
-                      <AlertCircle size={14} className="text-rose-500" />
-                    )}
+                    <span className={cn('text-sm font-medium', product.stock <= product.lowStockThreshold ? 'text-rose-600' : '')}>{product.stock}</span>
+                    {product.stock <= product.lowStockThreshold && <AlertCircle size={14} className="text-rose-500" />}
                   </div>
                 </td>
                 <td className="px-6 py-4">
-                  <span className={cn(
-                    "px-2 py-1 rounded-full text-[10px] font-bold uppercase",
-                    product.available ? "bg-orange-50 text-orange-600" : "bg-slate-100 text-slate-500"
-                  )}>
+                  <span className={cn('px-2 py-1 rounded-full text-[10px] font-bold uppercase', product.available ? 'bg-orange-50 text-orange-600' : 'bg-slate-100 text-slate-500')}>
                     {product.available ? 'Active' : 'Hidden'}
                   </span>
                 </td>
-                <td className="px-6 py-4 text-right">
-                  <div className="flex justify-end gap-2">
-                    <button className="text-slate-400 hover:text-orange-600 transition-colors p-2 cursor-pointer">
-                      <Settings size={18} />
-                    </button>
-                    <button className="text-slate-400 hover:text-rose-600 transition-colors p-2 cursor-pointer">
-                      <Trash2 size={18} />
-                    </button>
-                  </div>
-                </td>
+                {isManager && (
+                  <td className="px-6 py-4 text-right">
+                    <div className="flex justify-end gap-1">
+                      <button onClick={() => toggleAvailability(product.id)} className="text-slate-400 hover:text-blue-600 transition-colors p-2 cursor-pointer" title={product.available ? 'Hide' : 'Show'}>
+                        {product.available ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                      <button onClick={() => openEditProduct(product)} className="text-slate-400 hover:text-orange-600 transition-colors p-2 cursor-pointer"><Edit2 size={16} /></button>
+                      {isAdmin && (
+                        <button onClick={() => deleteProduct(product.id)} className="text-slate-400 hover:text-rose-600 transition-colors p-2 cursor-pointer"><Trash2 size={16} /></button>
+                      )}
+                    </div>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -761,6 +1079,8 @@ export default function App() {
     </div>
   );
 
+  // ─── RENDER: Inventory ────────────────────────────────────────────────────
+
   const renderInventory = () => (
     <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
       <div className="flex justify-between items-center">
@@ -768,33 +1088,23 @@ export default function App() {
           <h1 className="text-2xl font-bold">Inventory Management</h1>
           <p className="text-slate-500">Ingredients, packaging, and usage tracking</p>
         </div>
-        <div className="flex gap-2">
-          <button 
-            onClick={() => { setStockModalType('in'); setShowStockModal(true); }}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer"
-          >
-            <Plus size={18} className="text-emerald-600" />
-            Stock-In
-          </button>
-          <button 
-            onClick={() => { setStockModalType('waste'); setShowStockModal(true); }}
-            className="flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 rounded-xl text-sm font-medium hover:bg-rose-100 transition-colors cursor-pointer"
-          >
-            <Trash2 size={18} />
-            Report Waste
-          </button>
-        </div>
+        {isManager && (
+          <div className="flex gap-2">
+            <button onClick={() => openStockModal('in')} className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
+              <Plus size={18} className="text-emerald-600" /> Stock-In
+            </button>
+            <button onClick={() => openStockModal('waste')} className="flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 rounded-xl text-sm font-medium hover:bg-rose-100 transition-colors cursor-pointer">
+              <Trash2 size={18} /> Report Waste
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-            <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+            <div className="p-6 border-b border-slate-50">
               <h3 className="text-lg font-bold">Current Stock</h3>
-              <div className="flex gap-2">
-                <button className="px-3 py-1 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold">Raw</button>
-                <button className="px-3 py-1 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold">Packaging</button>
-              </div>
             </div>
             <table className="w-full text-left">
               <thead>
@@ -814,11 +1124,8 @@ export default function App() {
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-bold">{item.stock} {item.unit}</span>
                         <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                          <div 
-                            className={cn(
-                              "h-full rounded-full",
-                              item.stock <= item.lowStockThreshold ? "bg-rose-500" : "bg-orange-500"
-                            )}
+                          <div
+                            className={cn('h-full rounded-full', item.stock <= item.lowStockThreshold ? 'bg-rose-500' : 'bg-orange-500')}
                             style={{ width: `${Math.min(100, (item.stock / (item.lowStockThreshold * 5)) * 100)}%` }}
                           />
                         </div>
@@ -826,9 +1133,7 @@ export default function App() {
                     </td>
                     <td className="px-6 py-4">
                       {item.stock <= item.lowStockThreshold ? (
-                        <span className="flex items-center gap-1 text-rose-600 text-[10px] font-bold uppercase">
-                          <AlertCircle size={12} /> Low Stock
-                        </span>
+                        <span className="flex items-center gap-1 text-rose-600 text-[10px] font-bold uppercase"><AlertCircle size={12} /> Low Stock</span>
                       ) : (
                         <span className="text-emerald-600 text-[10px] font-bold uppercase">In Stock</span>
                       )}
@@ -838,33 +1143,53 @@ export default function App() {
               </tbody>
             </table>
           </div>
+
+          {/* Low-stock product alerts */}
+          {lowStockProducts.length > 0 && (
+            <div className="bg-white rounded-2xl border border-rose-100 shadow-sm overflow-hidden">
+              <div className="p-6 border-b border-rose-50 flex items-center gap-3">
+                <AlertCircle size={18} className="text-rose-500" />
+                <h3 className="text-lg font-bold text-rose-700">Low Stock Products</h3>
+              </div>
+              <div className="p-6 grid grid-cols-2 gap-3">
+                {lowStockProducts.map(p => (
+                  <div key={p.id} className="flex items-center gap-3 p-3 bg-rose-50 rounded-xl border border-rose-100">
+                    <img src={p.image} className="w-9 h-9 rounded-lg object-cover" alt="" />
+                    <div>
+                      <p className="text-xs font-bold text-slate-900 truncate">{p.name}</p>
+                      <p className="text-[10px] text-rose-600">{p.stock} left (min {p.lowStockThreshold})</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
           <h3 className="text-lg font-bold mb-4">Inventory History</h3>
-          <div className="space-y-4">
-            {inventoryLogs.slice(0, 10).map(log => (
+          <div className="space-y-4 max-h-[600px] overflow-y-auto pr-1">
+            {inventoryLogs.length === 0 && (
+              <p className="text-sm text-slate-400 text-center py-8">No inventory activity yet.</p>
+            )}
+            {inventoryLogs.slice(0, 20).map(log => (
               <div key={log.id} className="flex gap-3 pb-4 border-b border-slate-50 last:border-0">
                 <div className={cn(
-                  "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
-                  log.type === 'sale' ? "bg-orange-50 text-orange-600" : 
-                  log.type === 'waste' ? "bg-rose-50 text-rose-600" : "bg-blue-50 text-blue-600"
+                  'w-8 h-8 rounded-lg flex items-center justify-center shrink-0',
+                  log.type === 'sale' ? 'bg-orange-50 text-orange-600' :
+                    log.type === 'waste' ? 'bg-rose-50 text-rose-600' : 'bg-blue-50 text-blue-600',
                 )}>
-                  {log.type === 'sale' ? <TrendingUp size={16} /> : 
-                   log.type === 'waste' ? <Trash2 size={16} /> : <Plus size={16} />}
+                  {log.type === 'sale' ? <TrendingUp size={16} /> : log.type === 'waste' ? <Trash2 size={16} /> : <Plus size={16} />}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-bold truncate">{log.itemName}</p>
                   <p className="text-[10px] text-slate-500">{log.reason}</p>
                 </div>
                 <div className="text-right">
-                  <p className={cn(
-                    "text-sm font-bold",
-                    (log.type === 'sale' || log.type === 'waste') ? "text-rose-600" : "text-emerald-600"
-                  )}>
+                  <p className={cn('text-sm font-bold', (log.type === 'sale' || log.type === 'waste') ? 'text-rose-600' : 'text-emerald-600')}>
                     {(log.type === 'sale' || log.type === 'waste') ? '-' : '+'}{log.quantity}
                   </p>
-                  <p className="text-[10px] text-slate-400">{new Date(log.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</p>
+                  <p className="text-[10px] text-slate-400">{new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
                 </div>
               </div>
             ))}
@@ -874,151 +1199,179 @@ export default function App() {
     </div>
   );
 
-  const renderReports = () => {
-    const salesData = [
-      { name: 'Week 1', sales: 4000 },
-      { name: 'Week 2', sales: 3000 },
-      { name: 'Week 3', sales: 6000 },
-      { name: 'Week 4', sales: 8000 },
-    ];
+  // ─── RENDER: Reports ──────────────────────────────────────────────────────
 
-    const filteredTransactions = transactions.filter(tx => {
-      if (reportCategory === 'all') return true;
-      return tx.items.some(item => item.category === reportCategory);
-    });
+  const renderReports = () => (
+    <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-2xl font-bold">Reporting & Insights</h1>
+          <p className="text-slate-500">Detailed business performance and forecasts</p>
+        </div>
+        <div className="flex gap-2">
+          <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
+            <Download size={18} /> Export PDF
+          </button>
+          <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
+            <Database size={18} /> Export Excel
+          </button>
+        </div>
+      </div>
 
-    const breakdownData = [
-      { type: 'Fries', size: 'Medium', flavor: 'Classic', sales: 120, revenue: 300 },
-      { type: 'Fries', size: 'Large', flavor: 'Cheese', sales: 85, revenue: 297.5 },
-      { type: 'Drinks', size: 'Medium', flavor: 'None', sales: 45, revenue: 81 },
-      { type: 'Add-ons', size: 'None', flavor: 'Cheese', sales: 30, revenue: 15 },
-    ];
-
-    return (
-      <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold">Reporting & Insights</h1>
-            <p className="text-slate-500">Detailed business performance and forecasts</p>
+      <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+        <div className="flex flex-wrap gap-4 items-end mb-6">
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-400 uppercase">Date Range</label>
+            <select value={reportRange} onChange={e => setReportRange(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
           </div>
-          <div className="flex gap-2">
-            <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
-              <Download size={18} />
-              Export PDF
-            </button>
-            <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
-              <Database size={18} />
-              Export Excel
-            </button>
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
+            <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+              <option value="all">All Categories</option>
+              <option value="fries">Fries</option>
+              <option value="drinks">Drinks</option>
+              <option value="add-ons">Add-ons</option>
+              <option value="combos">Combos</option>
+            </select>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-          <div className="flex flex-wrap gap-4 items-end mb-6">
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-400 uppercase">Date Range</label>
-              <select 
-                value={reportRange}
-                onChange={(e) => setReportRange(e.target.value)}
-                className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer"
-              >
-                <option value="daily">Daily</option>
-                <option value="weekly">Weekly</option>
-                <option value="monthly">Monthly</option>
-                <option value="custom">Custom Range</option>
-              </select>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2">
+            <h3 className="text-lg font-bold mb-6">Revenue Breakdown</h3>
+            <div className="h-[300px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={weekChartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                  <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff' }} />
+                  <Area type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={3} fill="#fff7ed" />
+                </AreaChart>
+              </ResponsiveContainer>
             </div>
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
-              <select 
-                value={reportCategory}
-                onChange={(e) => setReportCategory(e.target.value)}
-                className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer"
-              >
-                <option value="all">All Categories</option>
-                <option value="fries">Fries</option>
-                <option value="drinks">Drinks</option>
-                <option value="add-ons">Add-ons</option>
-                <option value="combos">Combos</option>
-              </select>
-            </div>
-            <button className="px-6 py-2 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 transition-all cursor-pointer">
-              Generate Report
-            </button>
           </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2">
-              <h3 className="text-lg font-bold mb-6">Revenue Breakdown</h3>
-              <div className="h-[300px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={salesData}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
-                    <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
-                    <Tooltip contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff'}} />
-                    <Area type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={3} fill="#fff7ed" />
-                  </AreaChart>
-                </ResponsiveContainer>
+          <div className="space-y-4">
+            <h3 className="text-lg font-bold mb-4">Summary</h3>
+            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-slate-500">Transactions</span>
+                <span className="text-sm font-bold">{filteredTransactions.length}</span>
               </div>
-            </div>
-            <div className="space-y-4">
-              <h3 className="text-lg font-bold mb-4">Summary</h3>
-              <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                <div className="flex justify-between items-center mb-4">
-                  <span className="text-sm text-slate-500">Refunds & Voids</span>
-                  <span className="text-sm font-bold text-rose-500">4 ($12.50)</span>
-                </div>
-                <div className="flex justify-between items-center mb-4">
-                  <span className="text-sm text-slate-500">Discount Usage</span>
-                  <span className="text-sm font-bold text-orange-600">12 ($24.00)</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-slate-500">Avg. Order Value</span>
-                  <span className="text-sm font-bold text-slate-900">$8.45</span>
-                </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-slate-500">Revenue</span>
+                <span className="text-sm font-bold text-orange-600">{formatCurrency(reportRevenue)}</span>
               </div>
-              <div className="p-4 bg-orange-50 rounded-2xl border border-orange-100">
-                <p className="text-xs font-bold text-orange-900 mb-1">Profit Margin Analysis</p>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm font-bold text-orange-600">Overall Margin</span>
-                  <span className="text-lg font-black text-orange-600">42%</span>
-                </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-slate-500">Discounts Given</span>
+                <span className="text-sm font-bold text-rose-500">-{formatCurrency(reportDiscount)}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-slate-500">Avg. Order Value</span>
+                <span className="text-sm font-bold">{formatCurrency(avgOrderValue)}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-slate-500">Refunds</span>
+                <span className="text-sm font-bold text-rose-500">{reportRefunds}</span>
               </div>
             </div>
           </div>
         </div>
+      </div>
 
-        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-          <h3 className="text-lg font-bold mb-6">Detailed Product Breakdown</h3>
+      {/* Top Products Report */}
+      <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+        <h3 className="text-lg font-bold mb-6">Top Selling Products</h3>
+        {topProducts.length === 0 ? (
+          <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
+        ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left">
               <thead>
                 <tr className="text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-50">
-                  <th className="pb-4">Type</th>
-                  <th className="pb-4">Size</th>
-                  <th className="pb-4">Flavor</th>
+                  <th className="pb-4">Product</th>
                   <th className="pb-4">Qty Sold</th>
                   <th className="pb-4 text-right">Revenue</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
-                {breakdownData.map((row, i) => (
+                {topProducts.map((row, i) => (
                   <tr key={i} className="text-sm hover:bg-slate-50 transition-colors">
-                    <td className="py-4 font-bold">{row.type}</td>
-                    <td className="py-4 text-slate-500">{row.size}</td>
-                    <td className="py-4 text-slate-500">{row.flavor}</td>
-                    <td className="py-4">{row.sales}</td>
+                    <td className="py-4 font-bold">{row.name}</td>
+                    <td className="py-4">{row.qty}</td>
                     <td className="py-4 text-right font-bold text-orange-600">{formatCurrency(row.revenue)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        </div>
+        )}
       </div>
-    );
-  };
+
+      {/* Category Breakdown */}
+      <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+        <h3 className="text-lg font-bold mb-6">Sales by Category</h3>
+        {categoryBreakdown.length === 0 ? (
+          <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
+        ) : (
+          <div className="h-[250px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={categoryBreakdown}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff' }} />
+                <Bar dataKey="revenue" fill="#f97316" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      {/* Transaction History */}
+      <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+        <h3 className="text-lg font-bold mb-6">Transaction History</h3>
+        {filteredTransactions.length === 0 ? (
+          <p className="text-slate-400 text-sm text-center py-8">No transactions in selected range.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-50">
+                  <th className="pb-4">ID</th>
+                  <th className="pb-4">Date</th>
+                  <th className="pb-4">Cashier</th>
+                  <th className="pb-4">Items</th>
+                  <th className="pb-4">Payment</th>
+                  <th className="pb-4 text-right">Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {filteredTransactions.slice(0, 20).map(tx => (
+                  <tr key={tx.id} className="text-sm hover:bg-slate-50 transition-colors">
+                    <td className="py-3 font-mono text-xs text-slate-500">{tx.id}</td>
+                    <td className="py-3 text-slate-500">{formatDate(tx.timestamp)}</td>
+                    <td className="py-3 font-medium">{tx.cashierName}</td>
+                    <td className="py-3 text-slate-500">{tx.items.length} item{tx.items.length !== 1 ? 's' : ''}</td>
+                    <td className="py-3">
+                      <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md text-[10px] font-bold uppercase">{tx.paymentMethod}</span>
+                    </td>
+                    <td className="py-3 text-right font-bold text-orange-600">{formatCurrency(tx.total * 1.1)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // ─── RENDER: Users ────────────────────────────────────────────────────────
 
   const renderUsers = () => (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -1027,16 +1380,38 @@ export default function App() {
           <h1 className="text-2xl font-bold text-slate-900">User Management & Security</h1>
           <p className="text-slate-500">Staff accounts, activity logs, and system security</p>
         </div>
-        <button className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
-          <Plus size={18} />
-          Add New User
-        </button>
+        {isAdmin && (
+          <button onClick={() => { setNewUser({ name: '', email: '', role: 'cashier' }); setUserFormError(''); setShowAddUser(true); }} className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
+            <Plus size={18} /> Add New User
+          </button>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
+          {/* Role switcher for demo */}
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Switch Role (Demo)</h3>
+            <div className="flex gap-3">
+              {(['admin', 'manager', 'cashier'] as Role[]).map(role => (
+                <button
+                  key={role}
+                  onClick={() => switchRole(role)}
+                  className={cn(
+                    'flex-1 py-2 rounded-xl text-sm font-bold capitalize transition-all cursor-pointer border',
+                    currentUser?.role === role
+                      ? 'bg-orange-600 text-white border-orange-600 shadow-lg shadow-orange-200'
+                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100',
+                  )}
+                >
+                  {role}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {INITIAL_USERS.map(user => (
+            {users.map(user => (
               <div key={user.id} className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
                 <div className="flex items-center gap-4 mb-4">
                   <img src={user.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
@@ -1044,18 +1419,19 @@ export default function App() {
                     <h3 className="font-bold text-slate-900">{user.name}</h3>
                     <p className="text-xs text-slate-500">{user.email}</p>
                   </div>
-                  <span className={cn(
-                    "px-2 py-1 rounded-full text-[10px] font-bold uppercase",
-                    user.role === 'admin' ? "bg-violet-50 text-violet-600" : 
-                    user.role === 'manager' ? "bg-blue-50 text-blue-600" : "bg-orange-50 text-orange-600"
+                  <span className={cn('px-2 py-1 rounded-full text-[10px] font-bold uppercase',
+                    user.role === 'admin' ? 'bg-violet-50 text-violet-600' :
+                      user.role === 'manager' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600',
                   )}>
                     {user.role}
                   </span>
                 </div>
-                <div className="flex gap-2">
-                  <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Edit</button>
-                  <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Reset Pass</button>
-                </div>
+                {isAdmin && (
+                  <div className="flex gap-2">
+                    <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Edit</button>
+                    <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Reset Pass</button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1063,10 +1439,10 @@ export default function App() {
           <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-50 flex justify-between items-center">
               <h3 className="text-lg font-bold text-slate-900">System Activity Logs</h3>
-              <button className="text-xs font-bold text-orange-600 hover:underline">View All</button>
             </div>
-            <div className="p-6 space-y-4">
-              {activityLogs.slice(0, 10).map(log => (
+            <div className="p-6 space-y-4 max-h-[400px] overflow-y-auto">
+              {activityLogs.length === 0 && <p className="text-sm text-slate-400 text-center py-8">No activity recorded yet.</p>}
+              {activityLogs.slice(0, 30).map(log => (
                 <div key={log.id} className="flex gap-4 pb-4 border-b border-slate-50 last:border-0">
                   <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 shrink-0">
                     <Activity size={18} />
@@ -1074,7 +1450,7 @@ export default function App() {
                   <div className="flex-1">
                     <p className="text-sm font-bold text-slate-900">{log.action}</p>
                     <p className="text-xs text-slate-500">{log.details}</p>
-                    <p className="text-[10px] text-slate-400 mt-1">{log.userName} • {formatDate(log.timestamp)}</p>
+                    <p className="text-[10px] text-slate-400 mt-1">{log.userName} · {formatDate(log.timestamp)}</p>
                   </div>
                 </div>
               ))}
@@ -1106,19 +1482,48 @@ export default function App() {
                 </div>
                 <ArrowRightLeft size={16} className="text-slate-400" />
               </button>
-              <div className="p-4 bg-rose-50 rounded-2xl border border-rose-100">
-                <div className="flex items-center gap-3 mb-2">
-                  <Shield size={20} className="text-rose-500" />
-                  <p className="text-sm font-bold text-rose-900">Security Alert</p>
+              {lowStockCount > 0 && (
+                <div className="p-4 bg-rose-50 rounded-2xl border border-rose-100">
+                  <div className="flex items-center gap-3 mb-2">
+                    <Shield size={20} className="text-rose-500" />
+                    <p className="text-sm font-bold text-rose-900">Stock Alert</p>
+                  </div>
+                  <p className="text-xs text-rose-700">{lowStockCount} item{lowStockCount !== 1 ? 's' : ''} below minimum stock level.</p>
                 </div>
-                <p className="text-xs text-rose-700">2 failed login attempts detected from IP 192.168.1.45</p>
-              </div>
+              )}
+            </div>
+          </div>
+
+          {/* Promotions management */}
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-lg font-bold text-slate-900 mb-4">Active Promotions</h3>
+            <div className="space-y-3">
+              {promotions.map(p => (
+                <div key={p.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">{p.code}</p>
+                    <p className="text-xs text-slate-500">{p.description}</p>
+                    <p className="text-xs text-orange-600 font-medium">
+                      {p.discountType === 'percentage' ? `${p.value}% off` : `$${p.value} off`}
+                    </p>
+                  </div>
+                  <span className={cn('text-[10px] font-bold px-2 py-1 rounded-full', p.active ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-200 text-slate-500')}>
+                    {p.active ? 'Active' : 'Off'}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
         </div>
       </div>
     </div>
   );
+
+  // ─── Guard: Login ─────────────────────────────────────────────────────────
+
+  if (!currentUser) return <LoginScreen onLogin={handleLogin} />;
+
+  // ─── Main layout ──────────────────────────────────────────────────────────
 
   return (
     <div className="flex h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
@@ -1132,58 +1537,29 @@ export default function App() {
         </div>
 
         <nav className="flex-1 space-y-2">
-          <SidebarItem 
-            icon={LayoutDashboard} 
-            label="Dashboard" 
-            active={activeTab === 'dashboard'} 
-            onClick={() => setActiveTab('dashboard')} 
-          />
-          <SidebarItem 
-            icon={ShoppingCart} 
-            label="Sales" 
-            active={activeTab === 'sales'} 
-            onClick={() => setActiveTab('sales')} 
-          />
-          <SidebarItem 
-            icon={Package} 
-            label="Products" 
-            active={activeTab === 'products'} 
-            onClick={() => setActiveTab('products')} 
-          />
-          <SidebarItem 
-            icon={ClipboardList} 
-            label="Inventory" 
-            active={activeTab === 'inventory'} 
-            onClick={() => setActiveTab('inventory')} 
-          />
-          <SidebarItem 
-            icon={BarChart3} 
-            label="Reports" 
-            active={activeTab === 'reports'} 
-            onClick={() => setActiveTab('reports')} 
-          />
-          <SidebarItem 
-            icon={Users} 
-            label="Users & Security" 
-            active={activeTab === 'users'} 
-            onClick={() => setActiveTab('users')} 
-          />
+          <SidebarItem icon={LayoutDashboard} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
+          <SidebarItem icon={ShoppingCart} label="Sales" active={activeTab === 'sales'} onClick={() => setActiveTab('sales')} />
+          <SidebarItem icon={Package} label="Products" active={activeTab === 'products'} onClick={() => setActiveTab('products')} />
+          <SidebarItem icon={ClipboardList} label="Inventory" active={activeTab === 'inventory'} onClick={() => setActiveTab('inventory')} badge={lowStockCount || undefined} />
+          <SidebarItem icon={BarChart3} label="Reports" active={activeTab === 'reports'} onClick={() => setActiveTab('reports')} />
+          {isManager && <SidebarItem icon={Users} label="Users & Security" active={activeTab === 'users'} onClick={() => setActiveTab('users')} />}
         </nav>
 
         <div className="mt-auto pt-6 border-t border-slate-50">
           <div className="flex items-center gap-3 px-2">
-            <div className="w-10 h-10 rounded-full bg-orange-100 flex items-center justify-center text-orange-700 font-bold overflow-hidden">
-              <img src={currentUser?.avatar} alt="" className="w-full h-full object-cover" />
-            </div>
+            <img src={currentUser.avatar} alt="" className="w-10 h-10 rounded-full object-cover" />
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-bold text-slate-900 truncate">{currentUser?.name}</p>
-              <p className="text-xs text-slate-500 capitalize">{currentUser?.role}</p>
+              <p className="text-sm font-bold text-slate-900 truncate">{currentUser.name}</p>
+              <p className="text-xs text-slate-500 capitalize">{currentUser.role}</p>
             </div>
+            <button onClick={handleLogout} className="text-slate-400 hover:text-rose-500 transition-colors cursor-pointer p-1" title="Sign out">
+              <LogOut size={16} />
+            </button>
           </div>
         </div>
       </aside>
 
-      {/* Main Content */}
+      {/* Main */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Top Bar */}
         <header className="h-20 bg-white border-b border-slate-100 flex items-center justify-between px-8 shrink-0">
@@ -1194,13 +1570,12 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <button className="p-2 text-slate-400 hover:text-slate-900 transition-colors relative cursor-pointer">
-              <AlertCircle size={22} />
-              <span className="absolute top-1 right-1 w-2 h-2 bg-rose-500 rounded-full border-2 border-white" />
-            </button>
-            <button className="p-2 text-slate-400 hover:text-slate-900 transition-colors cursor-pointer">
-              <Settings size={22} />
-            </button>
+            {lowStockCount > 0 && (
+              <button onClick={() => setActiveTab('inventory')} className="p-2 text-rose-500 hover:text-rose-700 transition-colors relative cursor-pointer">
+                <AlertCircle size={22} />
+                <span className="absolute top-1 right-1 w-2 h-2 bg-rose-500 rounded-full border-2 border-white" />
+              </button>
+            )}
             <div className="h-8 w-px bg-slate-100 mx-2" />
             <div className="text-right">
               <p className="text-sm font-bold text-slate-900">{new Date().toLocaleDateString('en-US', { weekday: 'long' })}</p>
@@ -1209,7 +1584,7 @@ export default function App() {
           </div>
         </header>
 
-        {/* View Content */}
+        {/* Content */}
         <div className="flex-1 overflow-y-auto p-8">
           {activeTab === 'dashboard' && renderDashboard()}
           {activeTab === 'sales' && renderSales()}
@@ -1220,7 +1595,7 @@ export default function App() {
         </div>
       </main>
 
-      {/* Receipt Modal */}
+      {/* ── MODAL: Receipt ─────────────────────────────────────────────────── */}
       <AnimatePresence>
         {showReceipt && (
           <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -1236,8 +1611,8 @@ export default function App() {
                 </div>
                 <h3 className="text-2xl font-bold text-slate-900">Order Successful!</h3>
                 <p className="text-slate-500">Transaction ID: {showReceipt.id}</p>
+                <p className="text-xs text-slate-400 mt-1">Payment: <span className="font-bold capitalize">{showReceipt.paymentMethod}</span></p>
               </div>
-              
               <div className="p-8 space-y-6">
                 <div className="space-y-3">
                   {showReceipt.items.map(item => (
@@ -1247,11 +1622,9 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                
                 <div className="pt-6 border-t border-dashed border-slate-200 space-y-2">
                   <div className="flex justify-between text-sm text-slate-500">
-                    <span>Subtotal</span>
-                    <span>{formatCurrency(showReceipt.subtotal)}</span>
+                    <span>Subtotal</span><span>{formatCurrency(showReceipt.subtotal)}</span>
                   </div>
                   {showReceipt.discount > 0 && (
                     <div className="flex justify-between text-sm text-rose-500">
@@ -1260,31 +1633,16 @@ export default function App() {
                     </div>
                   )}
                   <div className="flex justify-between text-sm text-slate-500">
-                    <span>Tax (10%)</span>
-                    <span>{formatCurrency(showReceipt.total * 0.1)}</span>
+                    <span>Tax (10%)</span><span>{formatCurrency(showReceipt.total * 0.1)}</span>
                   </div>
                   <div className="flex justify-between text-xl font-bold text-slate-900 pt-2">
                     <span>Total Paid</span>
                     <span className="text-orange-600">{formatCurrency(showReceipt.total * 1.1)}</span>
                   </div>
                 </div>
-
                 <div className="flex gap-3">
-                  <button 
-                    onClick={() => setShowReceipt(null)}
-                    className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl font-bold hover:bg-slate-200 transition-all cursor-pointer"
-                  >
-                    Close
-                  </button>
-                  <button 
-                    onClick={() => {
-                      window.print();
-                      setShowReceipt(null);
-                    }}
-                    className="flex-1 py-3 bg-orange-600 text-white rounded-xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-700 transition-all cursor-pointer"
-                  >
-                    Print Receipt
-                  </button>
+                  <button onClick={() => setShowReceipt(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl font-bold hover:bg-slate-200 transition-all cursor-pointer">Close</button>
+                  <button onClick={() => { window.print(); setShowReceipt(null); }} className="flex-1 py-3 bg-orange-600 text-white rounded-xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-700 transition-all cursor-pointer">Print Receipt</button>
                 </div>
               </div>
             </motion.div>
@@ -1292,71 +1650,87 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Add Product Modal */}
+      {/* ── MODAL: Add / Edit Product ────────────────────────────────────── */}
       <AnimatePresence>
         {showAddProduct && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-slate-100"
             >
               <div className="p-6 border-b border-slate-50 flex justify-between items-center">
-                <h3 className="text-xl font-black text-slate-900">Add New Product</h3>
-                <button onClick={() => setShowAddProduct(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer">
-                  <X size={20} className="text-slate-400" />
-                </button>
+                <h3 className="text-xl font-black text-slate-900">{editProduct ? 'Edit Product' : 'Add New Product'}</h3>
+                <button onClick={() => setShowAddProduct(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer"><X size={20} className="text-slate-400" /></button>
               </div>
-              <div className="p-6 space-y-4">
+              <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
                 <div className="space-y-1">
                   <label className="text-xs font-bold text-slate-400 uppercase">Product Name</label>
-                  <input type="text" placeholder="e.g. Sour Cream Fries" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                  <input type="text" value={newProduct.name} onChange={e => setNewProduct(p => ({ ...p, name: e.target.value }))} placeholder="e.g. Sour Cream Fries" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
-                    <select className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
-                      <option>Fries</option>
-                      <option>Drinks</option>
-                      <option>Add-ons</option>
+                    <select value={newProduct.category} onChange={e => setNewProduct(p => ({ ...p, category: e.target.value as Category }))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
+                      <option value="fries">Fries</option>
+                      <option value="drinks">Drinks</option>
+                      <option value="add-ons">Add-ons</option>
+                      <option value="combos">Combos</option>
                     </select>
                   </div>
                   <div className="space-y-1">
-                    <label className="text-xs font-bold text-slate-400 uppercase">Price</label>
-                    <input type="number" placeholder="0.00" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                    <label className="text-xs font-bold text-slate-400 uppercase">Price ($)</label>
+                    <input type="number" value={newProduct.price} onChange={e => setNewProduct(p => ({ ...p, price: e.target.value }))} placeholder="0.00" min="0" step="0.01" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Cost ($)</label>
+                    <input type="number" value={newProduct.cost} onChange={e => setNewProduct(p => ({ ...p, cost: e.target.value }))} placeholder="0.00" min="0" step="0.01" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Stock Qty</label>
+                    <input type="number" value={newProduct.stock} onChange={e => setNewProduct(p => ({ ...p, stock: e.target.value }))} placeholder="0" min="0" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">Size</label>
-                    <select className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
-                      <option>Small</option>
-                      <option>Medium</option>
-                      <option>Large</option>
-                      <option>None</option>
+                    <select value={newProduct.size} onChange={e => setNewProduct(p => ({ ...p, size: e.target.value as Product['size'] }))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
+                      <option value="small">Small</option>
+                      <option value="medium">Medium</option>
+                      <option value="large">Large</option>
+                      <option value="none">None</option>
                     </select>
                   </div>
                   <div className="space-y-1">
-                    <label className="text-xs font-bold text-slate-400 uppercase">Flavor</label>
-                    <input type="text" placeholder="e.g. Cheese" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                    <label className="text-xs font-bold text-slate-400 uppercase">Low Stock Alert</label>
+                    <input type="number" value={newProduct.lowStockThreshold} onChange={e => setNewProduct(p => ({ ...p, lowStockThreshold: e.target.value }))} placeholder="10" min="0" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
                   </div>
                 </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Image URL (optional)</label>
+                  <input type="text" value={newProduct.image} onChange={e => setNewProduct(p => ({ ...p, image: e.target.value }))} placeholder="https://..." className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                </div>
+                {productFormError && <p className="text-rose-500 text-xs font-medium">{productFormError}</p>}
               </div>
               <div className="p-6 bg-slate-50 flex gap-3">
                 <button onClick={() => setShowAddProduct(false)} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer">Cancel</button>
-                <button onClick={() => setShowAddProduct(false)} className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 shadow-lg shadow-orange-600/20 transition-all cursor-pointer">Save Product</button>
+                <button onClick={saveProduct} className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 shadow-lg shadow-orange-600/20 transition-all cursor-pointer">
+                  {editProduct ? 'Save Changes' : 'Save Product'}
+                </button>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
 
-      {/* Stock Transaction Modal */}
+      {/* ── MODAL: Stock Transaction ─────────────────────────────────────── */}
       <AnimatePresence>
         {showStockModal && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
@@ -1366,43 +1740,105 @@ export default function App() {
                 <h3 className="text-xl font-black text-slate-900">
                   {stockModalType === 'in' ? 'Record Stock In' : stockModalType === 'waste' ? 'Record Waste' : 'Stock Adjustment'}
                 </h3>
-                <button onClick={() => setShowStockModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer">
-                  <X size={20} className="text-slate-400" />
-                </button>
+                <button onClick={() => setShowStockModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer"><X size={20} className="text-slate-400" /></button>
               </div>
               <div className="p-6 space-y-4">
                 <div className="space-y-1">
                   <label className="text-xs font-bold text-slate-400 uppercase">Ingredient / Item</label>
-                  <select className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
-                    {ingredients.map(ing => <option key={ing.id}>{ing.name}</option>)}
+                  <select
+                    value={stockForm.ingredientId}
+                    onChange={e => setStockForm(f => ({ ...f, ingredientId: e.target.value }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                  >
+                    {ingredients.map(ing => <option key={ing.id} value={ing.id}>{ing.name} ({ing.stock} {ing.unit})</option>)}
                   </select>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">Quantity</label>
-                    <input type="number" placeholder="0" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                    <input
+                      type="number"
+                      value={stockForm.quantity}
+                      onChange={e => setStockForm(f => ({ ...f, quantity: e.target.value }))}
+                      placeholder="0"
+                      min="0"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                    />
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">Unit</label>
-                    <input type="text" disabled className="w-full bg-slate-100 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-400" value="kg" />
+                    <input
+                      type="text"
+                      disabled
+                      className="w-full bg-slate-100 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-400"
+                      value={ingredients.find(i => i.id === stockForm.ingredientId)?.unit || ''}
+                    />
                   </div>
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs font-bold text-slate-400 uppercase">Notes / Reason</label>
-                  <textarea placeholder="e.g. Monthly restock or Spoiled due to power outage" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 h-24 resize-none"></textarea>
+                  <textarea
+                    value={stockForm.notes}
+                    onChange={e => setStockForm(f => ({ ...f, notes: e.target.value }))}
+                    placeholder="e.g. Monthly restock or Spoiled due to power outage"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 h-24 resize-none"
+                  />
                 </div>
+                {stockFormError && <p className="text-rose-500 text-xs font-medium">{stockFormError}</p>}
               </div>
               <div className="p-6 bg-slate-50 flex gap-3">
                 <button onClick={() => setShowStockModal(false)} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer">Cancel</button>
-                <button 
-                  onClick={() => setShowStockModal(false)} 
+                <button
+                  onClick={submitStock}
                   className={cn(
-                    "flex-1 py-3 text-white rounded-xl text-sm font-bold shadow-lg transition-all cursor-pointer",
-                    stockModalType === 'in' ? "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20" : "bg-rose-600 hover:bg-rose-700 shadow-rose-600/20"
+                    'flex-1 py-3 text-white rounded-xl text-sm font-bold shadow-lg transition-all cursor-pointer',
+                    stockModalType === 'in' ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20' : 'bg-rose-600 hover:bg-rose-700 shadow-rose-600/20',
                   )}
                 >
                   Confirm Transaction
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── MODAL: Add User ───────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {showAddUser && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-slate-100"
+            >
+              <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+                <h3 className="text-xl font-black text-slate-900">Add New User</h3>
+                <button onClick={() => setShowAddUser(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer"><X size={20} className="text-slate-400" /></button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Full Name</label>
+                  <input type="text" value={newUser.name} onChange={e => setNewUser(u => ({ ...u, name: e.target.value }))} placeholder="e.g. Jane Smith" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Email</label>
+                  <input type="email" value={newUser.email} onChange={e => setNewUser(u => ({ ...u, email: e.target.value }))} placeholder="jane@fries.com" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Role</label>
+                  <select value={newUser.role} onChange={e => setNewUser(u => ({ ...u, role: e.target.value as Role }))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
+                    <option value="cashier">Cashier</option>
+                    <option value="manager">Manager</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </div>
+                {userFormError && <p className="text-rose-500 text-xs font-medium">{userFormError}</p>}
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button onClick={() => setShowAddUser(false)} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer">Cancel</button>
+                <button onClick={saveNewUser} className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 shadow-lg shadow-orange-600/20 transition-all cursor-pointer">Create User</button>
               </div>
             </motion.div>
           </div>
