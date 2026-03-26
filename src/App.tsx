@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import {
   LayoutDashboard,
   ShoppingCart,
@@ -73,6 +73,8 @@ import {
   INITIAL_PROMOTIONS,
 } from './constants';
 import { cn, formatCurrency, formatDate } from './utils';
+import { createOrder, addProduct as supabaseAddProduct, updateProduct as supabaseUpdateProduct, fetchProducts as supabaseFetchProducts, fetchOrders } from './supabaseServices';
+import { generateInsights } from './geminiService';
 
 // ─── tiny helpers ────────────────────────────────────────────────────────────
 
@@ -244,10 +246,15 @@ export default function App() {
   const [promoInput, setPromoInput] = useState('');
   const [promoError, setPromoError] = useState('');
   const [selectedPayment, setSelectedPayment] = useState<PaymentMethod>('cash');
+  const [isProcessingOrder, setIsProcessingOrder] = useState(false);
 
   // Reports
   const [reportRange, setReportRange] = useState('monthly');
   const [reportCategory, setReportCategory] = useState('all');
+  const [reportTab, setReportTab] = useState('overview');
+  const [insights, setInsights] = useState<string | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
 
   // Modals
   const [showAddProduct, setShowAddProduct] = useState(false);
@@ -256,6 +263,9 @@ export default function App() {
   const [stockModalType, setStockModalType] = useState<'in' | 'out' | 'waste'>('in');
   const [showAddUser, setShowAddUser] = useState(false);
   const [showRoleSwitch, setShowRoleSwitch] = useState(false);
+  const [showFlavorModal, setShowFlavorModal] = useState(false);
+  const [selectedProductForFlavor, setSelectedProductForFlavor] = useState<Product | null>(null);
+  const [selectedFlavor, setSelectedFlavor] = useState<Product['flavor']>('classic');
 
   // Add Product form state
   const [newProduct, setNewProduct] = useState({
@@ -298,7 +308,129 @@ export default function App() {
     setActivityLogs(prev => [entry, ...prev.slice(0, 199)]);
   }, [currentUser]);
 
-  // ─── Auth ────────────────────────────────────────────────────────────────
+  // ─── Load Products from Supabase ──────────────────────────────────────
+
+  useEffect(() => {
+    const loadSupabaseProducts = async () => {
+      try {
+        const result = await supabaseFetchProducts();
+        
+        if (result.success && result.data && result.data.length > 0) {
+          // Convert Supabase products to app format
+          const supabaseProducts = result.data.map((p: any) => ({
+            id: String(p.id), // Use Supabase ID as string
+            name: p.name,
+            price: p.price,
+            cost: p.cost || 0,
+            category: p.category as Category,
+            size: (p.size || 'medium') as Product['size'],
+            flavor: (p.flavor || 'classic') as Product['flavor'],
+            image: p.image_url || PLACEHOLDER_IMG,
+            available: p.available !== false,
+            stock: p.stock || 0,
+            lowStockThreshold: p.low_stock_threshold || 10,
+            salesVelocity: 'normal' as const,
+          }));
+          setProducts(supabaseProducts);
+        }
+      } catch (error) {
+        console.error('Error loading products from Supabase:', error);
+      }
+    };
+
+    loadSupabaseProducts();
+  }, []);
+
+  // ─── Load Orders from Supabase ──────────────────────────────────────
+
+  useEffect(() => {
+    const loadSupabaseOrders = async () => {
+      try {
+        const result = await fetchOrders();
+        
+        console.log('Fetch orders result:', result);
+        
+        if (!result.success) {
+          console.error('Failed to fetch orders:', result.error);
+          return;
+        }
+
+        if (!result.data) {
+          console.log('No orders found');
+          setTransactions([]);
+          return;
+        }
+
+        // result.data should be an array of orders with nested order_items
+        const orders = Array.isArray(result.data) ? result.data : [];
+        console.log('Orders from Supabase:', orders);
+
+        if (orders.length === 0) {
+          setTransactions([]);
+          return;
+        }
+
+        // Convert Supabase orders to Transaction format
+        const supabaseTransactions = orders.map((order: any) => {
+          const items = Array.isArray(order.order_items) ? order.order_items : [];
+          return {
+            id: order.order_number,
+            timestamp: new Date(order.created_at),
+            items: items.map((item: any) => ({
+              id: String(item.product_id),
+              name: item.products?.name || `Product ${item.product_id}`,
+              quantity: item.quantity || 1,
+              price: item.price || 0,
+            })),
+            total: order.total_amount || 0,
+            paymentMethod: 'cash' as PaymentMethod,
+            cashierName: 'System',
+            status: 'completed' as const,
+            discount: 0,
+          };
+        });
+        
+        console.log('Converted transactions:', supabaseTransactions);
+        setTransactions(supabaseTransactions);
+      } catch (error) {
+        console.error('Error loading orders from Supabase:', error);
+      }
+    };
+
+    loadSupabaseOrders();
+  }, []);
+
+  // ─── Fetch AI Insights ───────────────────────────────────────────────
+
+  const fetchInsights = async () => {
+    if (!import.meta.env.VITE_GEMINI_API_KEY) {
+      setInsightsError('Gemini API key not configured. Add VITE_GEMINI_API_KEY to .env.local');
+      return;
+    }
+
+    setInsightsLoading(true);
+    setInsightsError(null);
+
+    try {
+      const reportData = {
+        transactionCount: filteredTransactions.length,
+        totalRevenue: reportRevenue,
+        totalDiscount: reportDiscount,
+        avgOrderValue,
+        topProducts,
+        categoryBreakdown,
+        transactions: filteredTransactions,
+      };
+
+      const insightsText = await generateInsights(reportData);
+      setInsights(insightsText);
+    } catch (error) {
+      console.error('Error fetching insights:', error);
+      setInsightsError('Failed to generate insights. Check console for details.');
+    } finally {
+      setInsightsLoading(false);
+    }
+  };
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
@@ -323,6 +455,16 @@ export default function App() {
 
   const addToCart = (product: Product) => {
     if (!product.available || product.stock <= 0) return;
+    
+    // Show flavor modal for fries
+    if (product.category === 'fries') {
+      setSelectedProductForFlavor(product);
+      setSelectedFlavor('classic');
+      setShowFlavorModal(true);
+      return;
+    }
+    
+    // Add other products directly
     setCart(prev => {
       const existing = prev.find(item => item.id === product.id);
       if (existing) {
@@ -334,6 +476,24 @@ export default function App() {
       }
       return [...prev, { ...product, quantity: 1 }];
     });
+  };
+
+  const addFlavoredProductToCart = () => {
+    if (!selectedProductForFlavor) return;
+    
+    const flavoredProduct = { ...selectedProductForFlavor, flavor: selectedFlavor };
+    setCart(prev => {
+      const existing = prev.find(item => item.id === flavoredProduct.id && item.flavor === selectedFlavor);
+      if (existing) {
+        return prev.map(item =>
+          item.id === flavoredProduct.id && item.flavor === selectedFlavor
+            ? { ...item, quantity: Math.min(item.quantity + 1, selectedProductForFlavor.stock) }
+            : item,
+        );
+      }
+      return [...prev, { ...flavoredProduct, quantity: 1 }];
+    });
+    setShowFlavorModal(false);
   };
 
   const removeFromCart = (productId: string) => {
@@ -379,8 +539,10 @@ export default function App() {
 
   // ─── Process Order ───────────────────────────────────────────────────────
 
-  const processOrder = (method: PaymentMethod) => {
+  const processOrder = async (method: PaymentMethod) => {
     if (cart.length === 0 || !currentUser) return;
+    
+    setIsProcessingOrder(true);
 
     const tx: Transaction = {
       id: uid('TX'),
@@ -395,6 +557,23 @@ export default function App() {
       cashierId: currentUser.id,
       cashierName: currentUser.name,
     };
+
+    // Save order to Supabase
+    const orderResult = await createOrder(
+      cart,
+      method,
+      cartTotal,
+      cartDiscount,
+      appliedPromo?.code,
+    );
+
+    setIsProcessingOrder(false);
+
+    if (!orderResult.success) {
+      console.error('Failed to save order to Supabase:', orderResult.error);
+      alert('Error saving order to database. Please try again.');
+      return;
+    }
 
     // Deduct product stock
     setProducts(prev =>
@@ -446,31 +625,74 @@ export default function App() {
     setShowAddProduct(true);
   };
 
-  const saveProduct = () => {
+  const saveProduct = async () => {
     if (!newProduct.name.trim()) { setProductFormError('Product name is required.'); return; }
     if (!newProduct.price || isNaN(Number(newProduct.price)) || Number(newProduct.price) < 0) { setProductFormError('Enter a valid price.'); return; }
+    if (!newProduct.cost || isNaN(Number(newProduct.cost)) || Number(newProduct.cost) < 0) { setProductFormError('Enter a valid cost.'); return; }
     if (!newProduct.stock || isNaN(Number(newProduct.stock))) { setProductFormError('Enter a valid stock quantity.'); return; }
 
     if (editProduct) {
+      const updatedProduct = {
+        name: newProduct.name.trim(),
+        category: newProduct.category,
+        price: Number(newProduct.price),
+        cost: Number(newProduct.cost) || 0,
+        size: newProduct.size,
+        flavor: newProduct.flavor,
+        image: newProduct.image || PLACEHOLDER_IMG,
+        stock: Number(newProduct.stock),
+        lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
+      };
+
+      // Update in Supabase
+      const result = await supabaseUpdateProduct(editProduct.id, updatedProduct as any);
+      if (!result.success) {
+        setProductFormError('Failed to update product in database.');
+        console.error(result.error);
+        return;
+      }
+
       setProducts(prev => prev.map(p => p.id === editProduct.id ? {
-        ...p, name: newProduct.name.trim(), category: newProduct.category,
-        price: Number(newProduct.price), cost: Number(newProduct.cost) || 0,
-        size: newProduct.size, flavor: newProduct.flavor,
-        image: newProduct.image || PLACEHOLDER_IMG, stock: Number(newProduct.stock),
+        ...p,
+        name: newProduct.name.trim(),
+        category: newProduct.category,
+        price: Number(newProduct.price),
+        cost: Number(newProduct.cost) || 0,
+        size: newProduct.size,
+        flavor: newProduct.flavor,
+        image: newProduct.image || PLACEHOLDER_IMG,
+        stock: Number(newProduct.stock),
         lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
       } : p));
       logActivity('Product Edit', `Updated product: ${newProduct.name}`);
     } else {
       const prod: Product = {
-        id: uid('PROD'), name: newProduct.name.trim(), category: newProduct.category,
-        price: Number(newProduct.price), cost: Number(newProduct.cost) || 0,
-        size: newProduct.size, flavor: newProduct.flavor,
+        id: '', // Will be updated with the real ID from Supabase below
+        name: newProduct.name.trim(),
+        category: newProduct.category,
+        price: Number(newProduct.price),
+        cost: Number(newProduct.cost) || 0,
+        size: newProduct.size,
+        flavor: newProduct.flavor,
         image: newProduct.image || PLACEHOLDER_IMG,
-        available: true, stock: Number(newProduct.stock),
+        available: true,
+        stock: Number(newProduct.stock),
         lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
         salesVelocity: 'normal',
       };
-      setProducts(prev => [...prev, prod]);
+
+      // Add to Supabase
+      const result = await supabaseAddProduct(prod);
+      if (!result.success) {
+        console.error('Product add failed. Error object:', result.error);
+        const errorMsg = result.error?.message || 'Unknown database error';
+        setProductFormError(`Database Error: ${errorMsg}`);
+        return;
+      }
+
+      // Use the real ID returned from Supabase
+      const newDbProduct = result.data[0];
+      setProducts(prev => [...prev, { ...prod, id: String(newDbProduct.id) }]);
       logActivity('Product Add', `Added new product: ${prod.name}`);
     }
     setShowAddProduct(false);
@@ -925,6 +1147,7 @@ export default function App() {
                     <img src={item.image} alt={item.name} className="w-12 h-12 rounded-xl object-cover" />
                     <div className="flex-1 min-w-0">
                       <h4 className="text-sm font-bold text-slate-900 truncate">{item.name}</h4>
+                      {item.category === 'fries' && <p className="text-xs text-slate-500 capitalize">{item.flavor}</p>}
                       <p className="text-xs text-orange-600 font-medium">{formatCurrency(item.price)}</p>
                     </div>
                     <div className="flex items-center gap-2 bg-slate-50 rounded-lg p-1">
@@ -992,10 +1215,10 @@ export default function App() {
 
             <button
               onClick={() => processOrder(selectedPayment)}
-              disabled={cart.length === 0}
+              disabled={cart.length === 0 || isProcessingOrder}
               className="w-full py-4 bg-orange-600 text-white rounded-2xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-700 transition-all active:scale-95 disabled:opacity-50 disabled:shadow-none cursor-pointer"
             >
-              Place Order · {formatCurrency(cartTotal * 1.1)}
+              {isProcessingOrder ? 'Processing Order...' : `Place Order · ${formatCurrency(cartTotal * 1.1)}`}
             </button>
           </div>
         </div>
@@ -1218,156 +1441,290 @@ export default function App() {
         </div>
       </div>
 
-      <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-        <div className="flex flex-wrap gap-4 items-end mb-6">
-          <div className="space-y-1">
-            <label className="text-xs font-bold text-slate-400 uppercase">Date Range</label>
-            <select value={reportRange} onChange={e => setReportRange(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
-            </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
-            <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
-              <option value="all">All Categories</option>
-              <option value="fries">Fries</option>
-              <option value="drinks">Drinks</option>
-              <option value="add-ons">Add-ons</option>
-              <option value="combos">Combos</option>
-            </select>
-          </div>
-        </div>
+      {/* Report Tabs */}
+      <div className="flex gap-4 border-b border-slate-100">
+        <button
+          onClick={() => setReportTab('overview')}
+          className={`px-4 py-3 font-medium text-sm relative transition-colors whitespace-nowrap cursor-pointer ${
+            reportTab === 'overview'
+              ? 'text-orange-600 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-1 after:bg-orange-600'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Overview
+        </button>
+        <button
+          onClick={() => setReportTab('transactions')}
+          className={`px-4 py-3 font-medium text-sm relative transition-colors whitespace-nowrap cursor-pointer ${
+            reportTab === 'transactions'
+              ? 'text-orange-600 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-1 after:bg-orange-600'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Transactions
+        </button>
+        <button
+          onClick={() => setReportTab('insights')}
+          className={`px-4 py-3 font-medium text-sm relative transition-colors whitespace-nowrap cursor-pointer ${
+            reportTab === 'insights'
+              ? 'text-orange-600 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-1 after:bg-orange-600'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          AI Insights
+        </button>
+      </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
-            <h3 className="text-lg font-bold mb-6">Revenue Breakdown</h3>
-            <div className="h-[300px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={weekChartData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                  <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff' }} />
-                  <Area type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={3} fill="#fff7ed" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-          <div className="space-y-4">
-            <h3 className="text-lg font-bold mb-4">Summary</h3>
-            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-slate-500">Transactions</span>
-                <span className="text-sm font-bold">{filteredTransactions.length}</span>
+      {/* Overview Tab */}
+      {reportTab === 'overview' && (
+        <>
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+            <div className="flex flex-wrap gap-4 items-end mb-6">
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-400 uppercase">Date Range</label>
+                <select value={reportRange} onChange={e => setReportRange(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-slate-500">Revenue</span>
-                <span className="text-sm font-bold text-orange-600">{formatCurrency(reportRevenue)}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-slate-500">Discounts Given</span>
-                <span className="text-sm font-bold text-rose-500">-{formatCurrency(reportDiscount)}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-slate-500">Avg. Order Value</span>
-                <span className="text-sm font-bold">{formatCurrency(avgOrderValue)}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-slate-500">Refunds</span>
-                <span className="text-sm font-bold text-rose-500">{reportRefunds}</span>
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
+                <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+                  <option value="all">All Categories</option>
+                  <option value="fries">Fries</option>
+                  <option value="drinks">Drinks</option>
+                  <option value="add-ons">Add-ons</option>
+                  <option value="combos">Combos</option>
+                </select>
               </div>
             </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <h3 className="text-lg font-bold mb-6">Revenue Breakdown</h3>
+                <div className="h-[300px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={weekChartData}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                      <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                      <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                      <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff' }} />
+                      <Area type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={3} fill="#fff7ed" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+              <div className="space-y-4">
+                <h3 className="text-lg font-bold mb-4">Summary</h3>
+                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-slate-500">Transactions</span>
+                    <span className="text-sm font-bold">{filteredTransactions.length}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-slate-500">Revenue</span>
+                    <span className="text-sm font-bold text-orange-600">{formatCurrency(reportRevenue)}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-slate-500">Discounts Given</span>
+                    <span className="text-sm font-bold text-rose-500">-{formatCurrency(reportDiscount)}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-slate-500">Avg. Order Value</span>
+                    <span className="text-sm font-bold">{formatCurrency(avgOrderValue)}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-slate-500">Refunds</span>
+                    <span className="text-sm font-bold text-rose-500">{reportRefunds}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Top Products Report */}
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-lg font-bold mb-6">Top Selling Products</h3>
+            {topProducts.length === 0 ? (
+              <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-50">
+                      <th className="pb-4">Product</th>
+                      <th className="pb-4">Qty Sold</th>
+                      <th className="pb-4 text-right">Revenue</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {topProducts.map((row, i) => (
+                      <tr key={i} className="text-sm hover:bg-slate-50 transition-colors">
+                        <td className="py-4 font-bold">{row.name}</td>
+                        <td className="py-4">{row.qty}</td>
+                        <td className="py-4 text-right font-bold text-orange-600">{formatCurrency(row.revenue)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Category Breakdown */}
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-lg font-bold mb-6">Sales by Category</h3>
+            {categoryBreakdown.length === 0 ? (
+              <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
+            ) : (
+              <div className="h-[250px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={categoryBreakdown}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                    <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff' }} />
+                    <Bar dataKey="revenue" fill="#f97316" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Transactions Tab */}
+      {reportTab === 'transactions' && (
+        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+          <div className="flex flex-wrap gap-4 items-end mb-6">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-400 uppercase">Filter by Date</label>
+              <select value={reportRange} onChange={e => setReportRange(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-400 uppercase">Filter by Category</label>
+              <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+                <option value="all">All Categories</option>
+                <option value="fries">Fries</option>
+                <option value="drinks">Drinks</option>
+                <option value="add-ons">Add-ons</option>
+                <option value="combos">Combos</option>
+              </select>
+            </div>
+          </div>
+
+          <h3 className="text-lg font-bold mb-6">Transaction History</h3>
+          {filteredTransactions.length === 0 ? (
+            <p className="text-slate-400 text-sm text-center py-8">No transactions in selected range.</p>
+          ) : (
+            <div>
+              <div className="mb-4 text-sm text-slate-600">
+                Showing <span className="font-bold">{Math.min(filteredTransactions.length, 50)}</span> of <span className="font-bold">{filteredTransactions.length}</span> transactions
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-50">
+                      <th className="pb-4">Order ID</th>
+                      <th className="pb-4">Date & Time</th>
+                      <th className="pb-4">Cashier</th>
+                      <th className="pb-4">Items</th>
+                      <th className="pb-4">Payment Method</th>
+                      <th className="pb-4 text-right">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {filteredTransactions.slice(0, 50).map(tx => (
+                      <tr key={tx.id} className="text-sm hover:bg-slate-50 transition-colors">
+                        <td className="py-3 font-mono text-xs text-slate-600 font-bold">{tx.id}</td>
+                        <td className="py-3 text-slate-700">{formatDate(tx.timestamp)}</td>
+                        <td className="py-3 font-medium text-slate-900">{tx.cashierName}</td>
+                        <td className="py-3 text-slate-600">{tx.items.length} item{tx.items.length !== 1 ? 's' : ''}</td>
+                        <td className="py-3">
+                          <span className="px-3 py-1 bg-orange-100 text-orange-700 rounded-lg text-[10px] font-bold uppercase">{tx.paymentMethod}</span>
+                        </td>
+                        <td className="py-3 text-right font-bold text-orange-600">{formatCurrency(tx.total * 1.1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Insights Tab */}
+      {reportTab === 'insights' && (
+        <div className="space-y-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h3 className="text-lg font-bold">AI-Powered Business Insights</h3>
+                <p className="text-sm text-slate-500 mt-1">Get intelligent suggestions based on your sales data</p>
+              </div>
+              <button
+                onClick={fetchInsights}
+                disabled={insightsLoading || !filteredTransactions.length}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {insightsLoading ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Analyzing...
+                  </>
+                ) : (
+                  <>
+                    <Zap size={18} />
+                    Generate Insights
+                  </>
+                )}
+              </button>
+            </div>
+
+            {insightsError && (
+              <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl mb-6">
+                <p className="text-sm text-rose-700"><strong>Error:</strong> {insightsError}</p>
+              </div>
+            )}
+
+            {insights ? (
+              <div className="prose prose-sm max-w-none">
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-6 rounded-xl border border-blue-100">
+                  <div className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed font-sans">
+                    {insights.split('\n').map((line, idx) => (
+                      <div key={idx} className="mb-2">
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-12">
+                <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Zap size={32} className="text-slate-400" />
+                </div>
+                <p className="text-slate-500 mb-4">Click "Generate Insights" to analyze your sales data</p>
+                {filteredTransactions.length === 0 && (
+                  <p className="text-sm text-slate-400">You need some transactions to generate insights</p>
+                )}
+              </div>
+            )}
+
+            <div className="mt-6 p-4 bg-blue-50 border border-blue-100 rounded-xl">
+              <p className="text-xs text-slate-600">
+                <strong>How it works:</strong> This tab uses Google Gemini API to analyze your current sales metrics, top products, and trends to provide actionable business recommendations.
+              </p>
+            </div>
           </div>
         </div>
-      </div>
-
-      {/* Top Products Report */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-        <h3 className="text-lg font-bold mb-6">Top Selling Products</h3>
-        {topProducts.length === 0 ? (
-          <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-50">
-                  <th className="pb-4">Product</th>
-                  <th className="pb-4">Qty Sold</th>
-                  <th className="pb-4 text-right">Revenue</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-50">
-                {topProducts.map((row, i) => (
-                  <tr key={i} className="text-sm hover:bg-slate-50 transition-colors">
-                    <td className="py-4 font-bold">{row.name}</td>
-                    <td className="py-4">{row.qty}</td>
-                    <td className="py-4 text-right font-bold text-orange-600">{formatCurrency(row.revenue)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Category Breakdown */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-        <h3 className="text-lg font-bold mb-6">Sales by Category</h3>
-        {categoryBreakdown.length === 0 ? (
-          <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
-        ) : (
-          <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={categoryBreakdown}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', backgroundColor: '#fff' }} />
-                <Bar dataKey="revenue" fill="#f97316" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-      </div>
-
-      {/* Transaction History */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-        <h3 className="text-lg font-bold mb-6">Transaction History</h3>
-        {filteredTransactions.length === 0 ? (
-          <p className="text-slate-400 text-sm text-center py-8">No transactions in selected range.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-50">
-                  <th className="pb-4">ID</th>
-                  <th className="pb-4">Date</th>
-                  <th className="pb-4">Cashier</th>
-                  <th className="pb-4">Items</th>
-                  <th className="pb-4">Payment</th>
-                  <th className="pb-4 text-right">Total</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-50">
-                {filteredTransactions.slice(0, 20).map(tx => (
-                  <tr key={tx.id} className="text-sm hover:bg-slate-50 transition-colors">
-                    <td className="py-3 font-mono text-xs text-slate-500">{tx.id}</td>
-                    <td className="py-3 text-slate-500">{formatDate(tx.timestamp)}</td>
-                    <td className="py-3 font-medium">{tx.cashierName}</td>
-                    <td className="py-3 text-slate-500">{tx.items.length} item{tx.items.length !== 1 ? 's' : ''}</td>
-                    <td className="py-3">
-                      <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md text-[10px] font-bold uppercase">{tx.paymentMethod}</span>
-                    </td>
-                    <td className="py-3 text-right font-bold text-orange-600">{formatCurrency(tx.total * 1.1)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 
@@ -1650,6 +2007,52 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* ── MODAL: Select Flavor for Fries ──────────────────────────────── */}
+      <AnimatePresence>
+        {showFlavorModal && selectedProductForFlavor && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl border border-slate-100"
+            >
+              <div className="p-6 border-b border-slate-50">
+                <h3 className="text-xl font-black text-slate-900">Choose Flavor</h3>
+                <p className="text-sm text-slate-500 mt-1">{selectedProductForFlavor.name}</p>
+              </div>
+              <div className="p-6 space-y-3">
+                {[
+                  { value: 'classic' as const, label: ' Classic' },
+                  { value: 'cheese' as const, label: 'Cheese' },
+                  { value: 'barbecue' as const, label: ' Barbecue' },
+                  { value: 'sour cream' as const, label: 'Sour Cream' },
+                ].map(flavor => (
+                  <button
+                    key={flavor.value}
+                    onClick={() => setSelectedFlavor(flavor.value)}
+                    className={cn(
+                      'w-full p-4 rounded-xl border-2 transition-all text-left font-medium cursor-pointer',
+                      selectedFlavor === flavor.value
+                        ? 'border-orange-500 bg-orange-50 text-orange-900'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-orange-300',
+                    )}
+                  >
+                    {flavor.label}
+                  </button>
+                ))}
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button onClick={() => setShowFlavorModal(false)} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer">Cancel</button>
+                <button onClick={addFlavoredProductToCart} className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 shadow-lg shadow-orange-600/20 transition-all cursor-pointer">
+                  Add to Cart
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* ── MODAL: Add / Edit Product ────────────────────────────────────── */}
       <AnimatePresence>
         {showAddProduct && (
@@ -1687,27 +2090,16 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">Cost ($)</label>
-                    <input type="number" value={newProduct.cost} onChange={e => setNewProduct(p => ({ ...p, cost: e.target.value }))} placeholder="0.00" min="0" step="0.01" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                    <input type="number" value={newProduct.cost} onChange={e => setNewProduct(p => ({ ...p, cost: e.target.value }))} placeholder="0.00" min="0" step="0.01" inputMode="decimal" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">Stock Qty</label>
-                    <input type="number" value={newProduct.stock} onChange={e => setNewProduct(p => ({ ...p, stock: e.target.value }))} placeholder="0" min="0" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                    <input type="number" value={newProduct.stock} onChange={e => setNewProduct(p => ({ ...p, stock: e.target.value }))} placeholder="0" min="0" inputMode="numeric" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-xs font-bold text-slate-400 uppercase">Size</label>
-                    <select value={newProduct.size} onChange={e => setNewProduct(p => ({ ...p, size: e.target.value as Product['size'] }))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
-                      <option value="small">Small</option>
-                      <option value="medium">Medium</option>
-                      <option value="large">Large</option>
-                      <option value="none">None</option>
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-bold text-slate-400 uppercase">Low Stock Alert</label>
-                    <input type="number" value={newProduct.lowStockThreshold} onChange={e => setNewProduct(p => ({ ...p, lowStockThreshold: e.target.value }))} placeholder="10" min="0" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
-                  </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Low Stock Alert</label>
+                  <input type="number" value={newProduct.lowStockThreshold} onChange={e => setNewProduct(p => ({ ...p, lowStockThreshold: e.target.value }))} placeholder="10" min="0" inputMode="numeric" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs font-bold text-slate-400 uppercase">Image URL (optional)</label>
