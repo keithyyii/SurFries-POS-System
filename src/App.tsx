@@ -387,18 +387,21 @@ export default function App() {
         // Convert Supabase orders to Transaction format
         const supabaseTransactions = orders.map((order: any) => {
           const items = Array.isArray(order.order_items) ? order.order_items : [];
+          const subtotal = items.reduce((sum: number, item: any) => sum + (item.price || 0) * (item.quantity || 1), 0);
           return {
             id: order.order_number,
-            timestamp: new Date(order.created_at),
+            timestamp: order.created_at,
             items: items.map((item: any) => ({
               id: String(item.product_id),
               name: item.products?.name || `Product ${item.product_id}`,
               quantity: item.quantity || 1,
               price: item.price || 0,
             })),
+            subtotal: subtotal,
             total: order.total_amount || 0,
             paymentMethod: 'cash' as PaymentMethod,
             cashierName: 'System',
+            cashierId: 'system',
             status: 'completed' as const,
             discount: 0,
           };
@@ -716,9 +719,9 @@ export default function App() {
 
       // Add to Supabase
       const result = await supabaseAddProduct(prod);
-      if (!result.success) {
+      if (!result.success || !result.data) {
         console.error('Product add failed. Error object:', result.error);
-        const errorMsg = result.error?.message || 'Unknown database error';
+        const errorMsg = (result.error as any)?.message || 'Unknown database error';
         setProductFormError(`Database Error: ${errorMsg}`);
         return;
       }
@@ -1936,7 +1939,7 @@ export default function App() {
           <p className="text-slate-500">Staff accounts, activity logs, and system security</p>
         </div>
         {isAdmin && (
-          <button onClick={() => { setNewUser({ name: '', email: '', role: 'cashier' }); setUserFormError(''); setShowAddUser(true); }} className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
+          <button onClick={() => { setNewUser({ name: '', email: '', role: 'cashier', password: '' }); setUserFormError(''); setShowAddUser(true); }} className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
             <Plus size={18} /> Add New User
           </button>
         )}
