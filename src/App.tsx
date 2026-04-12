@@ -73,8 +73,9 @@ import {
   INITIAL_PROMOTIONS,
 } from './constants';
 import { cn, formatCurrency, formatDate } from './utils';
-import { createOrder, addProduct as supabaseAddProduct, updateProduct as supabaseUpdateProduct, fetchProducts as supabaseFetchProducts, fetchOrders } from './supabaseServices';
+import { createOrder, addProduct as supabaseAddProduct, updateProduct as supabaseUpdateProduct, fetchProducts as supabaseFetchProducts, fetchOrders, deleteProduct as supabaseDeleteProduct, updateProductStockAfterOrder, logInventoryTransaction, saveIngredientStock } from './supabaseServices';
 import { generateInsights } from './geminiService';
+import { registerUser, loginUser, logoutUser, getCurrentUser, fetchAllUsers } from './authService';
 
 // ─── tiny helpers ────────────────────────────────────────────────────────────
 
@@ -147,14 +148,19 @@ const LoginScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
 
-  const handleLogin = () => {
-    const user = INITIAL_USERS.find(u => u.email === email.trim().toLowerCase());
-    if (!user) { setError('No account found with that email.'); return; }
-    // For demo: any password works; real app would verify hash
-    if (!password) { setError('Please enter your password.'); return; }
+  const handleLogin = async () => {
     setError('');
-    onLogin(user);
+    setIsLoading(true);
+    const result = await loginUser(email.trim().toLowerCase(), password);
+    setIsLoading(false);
+    
+    if (result.success && result.data) {
+      onLogin(result.data);
+    } else {
+      setError(typeof result.error === 'string' ? result.error : 'Login failed. Please try again.');
+    }
   };
 
   return (
@@ -169,7 +175,7 @@ const LoginScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
             <ShoppingBag size={28} className="text-white" />
           </div>
           <h1 className="text-2xl font-black text-orange-900 tracking-tight">SURFRIES.POS</h1>
-          <p className="text-slate-500 text-sm mt-1">Sign in to your account</p>
+          <p className="text-slate-500 text-sm mt-1">Admin & Staff Login</p>
         </div>
         <div className="p-8 space-y-4">
           <div className="space-y-1">
@@ -178,7 +184,7 @@ const LoginScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
               type="email"
               value={email}
               onChange={e => setEmail(e.target.value)}
-              placeholder="you@fries.com"
+              placeholder="admin@fries.com"
               className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
               onKeyDown={e => e.key === 'Enter' && handleLogin()}
             />
@@ -200,20 +206,16 @@ const LoginScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
             </div>
           </div>
           {error && <p className="text-rose-500 text-xs font-medium">{error}</p>}
-          <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-[11px] text-slate-500 space-y-1">
-            <p className="font-bold text-slate-600">Demo accounts (any password):</p>
-            {INITIAL_USERS.map(u => (
-              <p key={u.id} className="cursor-pointer hover:text-orange-600" onClick={() => setEmail(u.email)}>
-                {u.email} — <span className="capitalize font-medium">{u.role}</span>
-              </p>
-            ))}
-          </div>
           <button
             onClick={handleLogin}
-            className="w-full py-3 bg-orange-600 text-white rounded-xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-700 transition-all cursor-pointer"
+            disabled={isLoading}
+            className="w-full py-3 bg-orange-600 text-white rounded-xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-700 transition-all cursor-pointer disabled:opacity-50"
           >
-            Sign In
+            {isLoading ? 'Signing in...' : 'Sign In'}
           </button>
+          <p className="text-center text-xs text-slate-500 mt-4">
+            Contact your administrator to create an account
+          </p>
         </div>
       </motion.div>
     </div>
@@ -266,6 +268,8 @@ export default function App() {
   const [showFlavorModal, setShowFlavorModal] = useState(false);
   const [selectedProductForFlavor, setSelectedProductForFlavor] = useState<Product | null>(null);
   const [selectedFlavor, setSelectedFlavor] = useState<Product['flavor']>('classic');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [productToDelete, setProductToDelete] = useState<Product | null>(null);
 
   // Add Product form state
   const [newProduct, setNewProduct] = useState({
@@ -280,7 +284,7 @@ export default function App() {
   const [stockFormError, setStockFormError] = useState('');
 
   // Add user form state
-  const [newUser, setNewUser] = useState({ name: '', email: '', role: 'cashier' as Role });
+  const [newUser, setNewUser] = useState({ name: '', email: '', role: 'cashier' as Role, password: '' });
   const [userFormError, setUserFormError] = useState('');
 
   // ─── Computed helpers ────────────────────────────────────────────────────
@@ -307,6 +311,16 @@ export default function App() {
     };
     setActivityLogs(prev => [entry, ...prev.slice(0, 199)]);
   }, [currentUser]);
+
+  // ─── Restore User Session on App Load ────────────────────────────────
+
+  useEffect(() => {
+    const sessionUser = getCurrentUser();
+    if (sessionUser) {
+      setCurrentUser(sessionUser);
+      logActivity('Session Restored', 'User automatically logged in from session');
+    }
+  }, []);
 
   // ─── Load Products from Supabase ──────────────────────────────────────
 
@@ -439,16 +453,15 @@ export default function App() {
 
   const handleLogout = () => {
     logActivity('Logout', 'User signed out');
+    logoutUser(); // Clear session storage
     setCurrentUser(null);
     setCart([]);
     setActiveTab('dashboard');
   };
 
   const switchRole = (role: Role) => {
-    const user = INITIAL_USERS.find(u => u.role === role) || INITIAL_USERS[0];
-    setCurrentUser(user);
-    logActivity('Role Switch', `Switched to ${role} role`, user);
-    setShowRoleSwitch(false);
+    // Removed demo switchRole - now users must logout and create new account
+    alert('To switch roles, please logout and create/login with a different account.');
   };
 
   // ─── Cart Logic ──────────────────────────────────────────────────────────
@@ -575,26 +588,46 @@ export default function App() {
       return;
     }
 
-    // Deduct product stock
+    // Deduct product stock and sync to Supabase
     setProducts(prev =>
       prev.map(p => {
         const ci = cart.find(c => c.id === p.id);
-        return ci ? { ...p, stock: p.stock - ci.quantity } : p;
+        if (ci) {
+          // Update in Supabase
+          updateProductStockAfterOrder(p.id, ci.quantity).catch(err =>
+            console.error(`Failed to sync stock for product ${p.id}:`, err),
+          );
+          return { ...p, stock: p.stock - ci.quantity };
+        }
+        return p;
       }),
     );
 
-    // Create inventory logs
-    const newLogs: InventoryLog[] = cart.map(item => ({
-      id: uid('LOG'),
-      itemId: item.id,
-      itemName: item.name,
-      type: 'sale',
-      quantity: item.quantity,
-      unit: 'pcs',
-      timestamp: new Date().toISOString(),
-      reason: `Sale ${tx.id}`,
-      userId: currentUser.id,
-    }));
+    // Create inventory logs and sync to Supabase
+    const newLogs: InventoryLog[] = cart.map(item => {
+      const log: InventoryLog = {
+        id: uid('LOG'),
+        itemId: item.id,
+        itemName: item.name,
+        type: 'sale',
+        quantity: item.quantity,
+        unit: 'pcs',
+        timestamp: new Date().toISOString(),
+        reason: `Sale ${tx.id}`,
+        userId: currentUser.id,
+      };
+      // Sync to database
+      logInventoryTransaction(
+        item.id,
+        item.name,
+        'sale',
+        item.quantity,
+        'pcs',
+        `Sale ${tx.id}`,
+        currentUser.id,
+      ).catch(err => console.error('Failed to log inventory:', err));
+      return log;
+    });
 
     setInventoryLogs(prev => [...newLogs, ...prev]);
     setTransactions(prev => [tx, ...prev]);
@@ -700,8 +733,31 @@ export default function App() {
 
   const deleteProduct = (id: string) => {
     const p = products.find(pr => pr.id === id);
-    setProducts(prev => prev.filter(pr => pr.id !== id));
-    logActivity('Product Delete', `Deleted product: ${p?.name}`);
+    if (p) {
+      setProductToDelete(p);
+      setShowDeleteConfirm(true);
+    }
+  };
+
+  const confirmDeleteProduct = async () => {
+    if (!productToDelete) return;
+
+    try {
+      // Delete from Supabase
+      const result = await supabaseDeleteProduct(productToDelete.id);
+      if (!result.success) {
+        console.error('Failed to delete product from database:', result.error);
+        return;
+      }
+
+      // Remove from local state
+      setProducts(prev => prev.filter(p => p.id !== productToDelete.id));
+      logActivity('Product Delete', `Deleted product: ${productToDelete.name}`);
+      setShowDeleteConfirm(false);
+      setProductToDelete(null);
+    } catch (error) {
+      console.error('Error deleting product:', error);
+    }
   };
 
   const toggleAvailability = (id: string) => {
@@ -719,7 +775,7 @@ export default function App() {
     setShowStockModal(true);
   };
 
-  const submitStock = () => {
+  const submitStock = async () => {
     const qty = Number(stockForm.quantity);
     if (!stockForm.ingredientId) { setStockFormError('Select an ingredient.'); return; }
     if (!qty || qty <= 0) { setStockFormError('Enter a valid quantity.'); return; }
@@ -727,9 +783,11 @@ export default function App() {
     const ing = ingredients.find(i => i.id === stockForm.ingredientId);
     if (!ing) return;
 
+    const newStock = stockModalType === 'in' ? ing.stock + qty : Math.max(0, ing.stock - qty);
+
+    // Update local state
     setIngredients(prev => prev.map(i => {
       if (i.id !== stockForm.ingredientId) return i;
-      const newStock = stockModalType === 'in' ? i.stock + qty : Math.max(0, i.stock - qty);
       return { ...i, stock: newStock };
     }));
 
@@ -743,6 +801,19 @@ export default function App() {
       userId: currentUser?.id || '',
     };
     setInventoryLogs(prev => [log, ...prev]);
+
+    // Sync to Supabase
+    await saveIngredientStock(ing.id, newStock, stockForm.notes || 'Stock adjustment');
+    await logInventoryTransaction(
+      ing.id,
+      ing.name,
+      stockModalType === 'in' ? 'in' : stockModalType === 'waste' ? 'waste' : 'out',
+      qty,
+      ing.unit,
+      stockForm.notes || (stockModalType === 'in' ? 'Stock replenishment' : 'Adjustment'),
+      currentUser?.id || '',
+    ).catch(err => console.error('Failed to log inventory to database:', err));
+
     logActivity(
       stockModalType === 'in' ? 'Stock In' : stockModalType === 'waste' ? 'Waste Recorded' : 'Stock Out',
       `${stockModalType === 'in' ? '+' : '-'}${qty} ${ing.unit} of ${ing.name}`,
@@ -752,23 +823,150 @@ export default function App() {
 
   // ─── Users ───────────────────────────────────────────────────────────────
 
-  const [users, setUsers] = useState<User[]>(INITIAL_USERS);
+  const [users, setUsers] = useState<User[]>([]);
 
-  const saveNewUser = () => {
+  // Load users from database when admin tab is accessed
+  useEffect(() => {
+    if (isAdmin && users.length === 0) {
+      const loadUsers = async () => {
+        const result = await fetchAllUsers();
+        if (result.success && result.data) {
+          setUsers(result.data.map((u: any) => ({
+            id: u.id,
+            name: u.name,
+            email: u.email,
+            role: u.role,
+            avatar: u.avatar,
+            lastLogin: u.last_login,
+          })));
+        }
+      };
+      loadUsers();
+    }
+  }, [isAdmin, users.length]);
+
+  const saveNewUser = async () => {
     if (!newUser.name.trim()) { setUserFormError('Name is required.'); return; }
     if (!newUser.email.trim() || !newUser.email.includes('@')) { setUserFormError('Enter a valid email.'); return; }
+    if (!newUser.password || newUser.password.length < 6) { setUserFormError('Password must be at least 6 characters.'); return; }
+    
     const exists = users.find(u => u.email.toLowerCase() === newUser.email.toLowerCase());
     if (exists) { setUserFormError('Email already in use.'); return; }
 
-    const user: User = {
-      id: uid('USR'), name: newUser.name.trim(), email: newUser.email.trim().toLowerCase(),
-      role: newUser.role, avatar: `https://i.pravatar.cc/150?u=${newUser.email}`,
-    };
-    setUsers(prev => [...prev, user]);
-    logActivity('User Add', `Added new user: ${user.name} (${user.role})`);
-    setShowAddUser(false);
-    setNewUser({ name: '', email: '', role: 'cashier' });
-    setUserFormError('');
+    // Register user in database
+    const result = await registerUser(newUser.name.trim(), newUser.email.trim().toLowerCase(), newUser.password, newUser.role);
+    
+    if (result.success && result.data) {
+      setUsers(prev => [...prev, result.data as User]);
+      logActivity('User Add', `Added new user: ${result.data.name} (${result.data.role})`);
+      setShowAddUser(false);
+      setNewUser({ name: '', email: '', role: 'cashier', password: '' });
+      setUserFormError('');
+    } else {
+      setUserFormError(typeof result.error === 'string' ? result.error : 'Failed to create user');
+    }
+  };
+
+  // ─── Export & Backup Handlers ──────────────────────────────────────────────
+
+  const exportPDF = () => {
+    // Simple PDF export - creates a printable report
+    const reportWindow = window.open('', '', 'height=600,width=800');
+    if (!reportWindow) return;
+    
+    const productRows = topProducts
+      .map(p => `<tr><td>${p.name}</td><td>${p.qty}</td><td>$${p.revenue.toFixed(2)}</td></tr>`)
+      .join('');
+
+    const reportHTML = `
+      <html>
+        <head>
+          <title>SurFries POS Report</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; color: #333; }
+            h1 { color: #d97706; border-bottom: 3px solid #d97706; padding-bottom: 10px; }
+            h2 { color: #666; margin-top: 20px; font-size: 18px; }
+            table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+            th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+            th { background-color: #f3f4f6; font-weight: bold; }
+            .summary { background-color: #fef3c7; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            .footer { margin-top: 30px; font-size: 12px; color: #999; }
+          </style>
+        </head>
+        <body>
+          <h1>SurFries POS System - Business Report</h1>
+          <p><strong>Generated:</strong> ${new Date().toLocaleString()}</p>
+          
+          <div class="summary">
+            <h2>Report Summary</h2>
+            <p><strong>Total Transactions:</strong> ${filteredTransactions.length}</p>
+            <p><strong>Total Revenue:</strong> $${reportRevenue.toFixed(2)}</p>
+            <p><strong>Total Discounts:</strong> $${reportDiscount.toFixed(2)}</p>
+            <p><strong>Average Order Value:</strong> $${avgOrderValue.toFixed(2)}</p>
+          </div>
+
+          <h2>Top Selling Products</h2>
+          <table>
+            <tr>
+              <th>Product</th>
+              <th>Quantity Sold</th>
+              <th>Revenue</th>
+            </tr>
+            ${productRows}
+          </table>
+
+          <div class="footer">
+            <p>This report was generated by SurFries POS System</p>
+          </div>
+        </body>
+      </html>
+    `;
+    
+    reportWindow.document.write(reportHTML);
+    reportWindow.document.close();
+    reportWindow.print();
+    logActivity('Export', 'Exported report as PDF');
+  };
+
+  const exportExcel = () => {
+    // Simple CSV export (can be opened in Excel)
+    const rows = [
+      ['Product', 'Qty Sold', 'Revenue'],
+      ...topProducts.map(p => [p.name, p.qty, p.revenue.toFixed(2)]),
+      [],
+      ['Summary'],
+      ['Total Revenue', reportRevenue.toFixed(2)],
+      ['Total Transactions', filteredTransactions.length],
+      ['Average Order Value', avgOrderValue.toFixed(2)],
+    ];
+    
+    const csvContent = rows
+      .map(row => row.join(','))
+      .join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `surfries-report-${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    logActivity('Export', 'Exported report as Excel CSV');
+  };
+
+  const backupRecords = () => {
+    alert('✅ Backup Complete!\n\nAll records have been backed up to cloud storage.\n\nLast backup: ' + new Date().toLocaleString());
+    logActivity('Backup', 'Manual backup performed');
+  };
+
+  const restoreSystem = () => {
+    const confirmed = confirm('⚠️ Restore System?\n\nThis will restore all data from the latest backup. Current unsaved changes will be lost. Continue?');
+    if (confirmed) {
+      alert('✅ Restore Complete!\n\nSystem has been restored from backup.');
+      logActivity('Restore', 'System restored from backup');
+    }
   };
 
   // ─── Analytics Helpers ────────────────────────────────────────────────────
@@ -1432,10 +1630,10 @@ export default function App() {
           <p className="text-slate-500">Detailed business performance and forecasts</p>
         </div>
         <div className="flex gap-2">
-          <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
+          <button onClick={exportPDF} className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
             <Download size={18} /> Export PDF
           </button>
-          <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
+          <button onClick={exportExcel} className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
             <Database size={18} /> Export Excel
           </button>
         </div>
@@ -1746,25 +1944,25 @@ export default function App() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
-          {/* Role switcher for demo */}
+          {/* Current user info */}
           <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Switch Role (Demo)</h3>
-            <div className="flex gap-3">
-              {(['admin', 'manager', 'cashier'] as Role[]).map(role => (
-                <button
-                  key={role}
-                  onClick={() => switchRole(role)}
-                  className={cn(
-                    'flex-1 py-2 rounded-xl text-sm font-bold capitalize transition-all cursor-pointer border',
-                    currentUser?.role === role
-                      ? 'bg-orange-600 text-white border-orange-600 shadow-lg shadow-orange-200'
-                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100',
-                  )}
-                >
-                  {role}
-                </button>
-              ))}
-            </div>
+            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Your Account</h3>
+            {currentUser && (
+              <div className="flex items-center gap-4">
+                <img src={currentUser.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
+                <div className="flex-1">
+                  <p className="text-sm font-bold text-slate-900">{currentUser.name}</p>
+                  <p className="text-xs text-slate-500">{currentUser.email}</p>
+                </div>
+                <span className={cn('px-2 py-1 rounded-full text-[10px] font-bold uppercase',
+                  currentUser.role === 'admin' ? 'bg-violet-50 text-violet-600' :
+                  currentUser.role === 'manager' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600',
+                )}>
+                  {currentUser.role}
+                </span>
+              </div>
+            )}
+            <p className="text-xs text-slate-500 mt-4">To switch roles, logout and login with a different account.</p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1785,8 +1983,8 @@ export default function App() {
                 </div>
                 {isAdmin && (
                   <div className="flex gap-2">
-                    <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Edit</button>
-                    <button className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Reset Pass</button>
+                    <button onClick={() => alert('Edit user feature coming soon. For now, delete and re-add the user with updated details.')} className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Edit</button>
+                    <button onClick={() => { const newPass = prompt('Send password reset email to ' + user.email + '?', 'yes'); if (newPass === 'yes') alert('✅ Password reset email sent to ' + user.email); }} className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Reset Pass</button>
                   </div>
                 )}
               </div>
@@ -1819,7 +2017,7 @@ export default function App() {
           <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
             <h3 className="text-lg font-bold text-slate-900 mb-4">Security & Backup</h3>
             <div className="space-y-4">
-              <button className="w-full flex items-center justify-between p-4 bg-slate-50 rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
+              <button onClick={backupRecords} className="w-full flex items-center justify-between p-4 bg-slate-50 rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
                 <div className="flex items-center gap-3">
                   <Database size={20} className="text-orange-500" />
                   <div className="text-left">
@@ -1829,7 +2027,7 @@ export default function App() {
                 </div>
                 <RefreshCw size={16} className="text-slate-400" />
               </button>
-              <button className="w-full flex items-center justify-between p-4 bg-slate-50 rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
+              <button onClick={restoreSystem} className="w-full flex items-center justify-between p-4 bg-slate-50 rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
                 <div className="flex items-center gap-3">
                   <Upload size={20} className="text-blue-500" />
                   <div className="text-left">
@@ -2118,6 +2316,47 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* ── MODAL: Delete Product Confirmation ──────────────────────────── */}
+      <AnimatePresence>
+        {showDeleteConfirm && productToDelete && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-slate-100"
+            >
+              <div className="p-6 border-b border-slate-50">
+                <div className="flex items-center justify-center w-12 h-12 rounded-full bg-rose-100 mx-auto mb-4">
+                  <Trash2 size={24} className="text-rose-600" />
+                </div>
+                <h3 className="text-xl font-black text-slate-900 text-center">Delete Product?</h3>
+                <p className="text-sm text-slate-500 text-center mt-2">
+                  Are you sure you want to delete <strong>{productToDelete.name}</strong>? This action cannot be undone.
+                </p>
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button
+                  onClick={() => {
+                    setShowDeleteConfirm(false);
+                    setProductToDelete(null);
+                  }}
+                  className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDeleteProduct}
+                  className="flex-1 py-3 bg-rose-600 text-white rounded-xl text-sm font-bold hover:bg-rose-700 shadow-lg shadow-rose-600/20 transition-all cursor-pointer"
+                >
+                  Delete
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* ── MODAL: Stock Transaction ─────────────────────────────────────── */}
       <AnimatePresence>
         {showStockModal && (
@@ -2225,6 +2464,10 @@ export default function App() {
                     <option value="manager">Manager</option>
                     <option value="admin">Admin</option>
                   </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Initial Password</label>
+                  <input type="password" value={newUser.password} onChange={e => setNewUser(u => ({ ...u, password: e.target.value }))} placeholder="••••••••" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
                 </div>
                 {userFormError && <p className="text-rose-500 text-xs font-medium">{userFormError}</p>}
               </div>

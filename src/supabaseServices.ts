@@ -80,6 +80,27 @@ export async function updateProduct(productId: string, updates: Partial<Product>
 }
 
 /**
+ * Delete a product from the database
+ */
+export async function deleteProduct(productId: string) {
+  try {
+    const { error } = await supabase
+      .from('products')
+      .delete()
+      .eq('id', productId);
+
+    if (error) {
+      console.error('Supabase error:', error.message);
+      throw error;
+    }
+    return { success: true };
+  } catch (error) {
+    console.error('Error deleting product:', error);
+    return { success: false, error };
+  }
+}
+
+/**
  * Fetch all products from database
  */
 export async function fetchProducts() {
@@ -205,6 +226,108 @@ export async function fetchOrder(orderId: number) {
     return { success: true, data };
   } catch (error) {
     console.error('Error fetching order:', error);
+    return { success: false, error };
+  }
+}
+
+/**
+ * Update product stock after order (deduct sold quantity)
+ */
+export async function updateProductStockAfterOrder(productId: string, quantitySold: number) {
+  try {
+    // Get current stock
+    const { data: currentProduct, error: fetchError } = await supabase
+      .from('products')
+      .select('stock')
+      .eq('id', productId)
+      .single();
+
+    if (fetchError) throw fetchError;
+
+    const newStock = Math.max(0, (currentProduct?.stock || 0) - quantitySold);
+
+    // Update stock
+    const { data, error } = await supabase
+      .from('products')
+      .update({ stock: newStock })
+      .eq('id', productId)
+      .select();
+
+    if (error) throw error;
+    return { success: true, data };
+  } catch (error) {
+    console.error('Error updating product stock:', error);
+    return { success: false, error };
+  }
+}
+
+/**
+ * Create or get ingredients table records
+ */
+export async function saveIngredientStock(ingredientId: string, newStock: number, reason: string) {
+  try {
+    // First, try to update existing ingredient
+    const { data: updateData, error: updateError } = await supabase
+      .from('ingredients')
+      .update({ stock: newStock, updated_at: new Date().toISOString() })
+      .eq('id', ingredientId)
+      .select();
+
+    if (updateError && updateError.code !== 'PGRST116') {
+      throw updateError;
+    }
+
+    // If no rows updated, insert new ingredient
+    if (!updateData || updateData.length === 0) {
+      const { data: insertData, error: insertError } = await supabase
+        .from('ingredients')
+        .insert([{ id: ingredientId, stock: newStock, reason, updated_at: new Date().toISOString() }])
+        .select();
+
+      if (insertError) throw insertError;
+      return { success: true, data: insertData };
+    }
+
+    return { success: true, data: updateData };
+  } catch (error) {
+    console.error('Error saving ingredient stock:', error);
+    return { success: false, error };
+  }
+}
+
+/**
+ * Log inventory transaction
+ */
+export async function logInventoryTransaction(
+  itemId: string,
+  itemName: string,
+  type: 'in' | 'out' | 'waste' | 'sale',
+  quantity: number,
+  unit: string,
+  reason: string,
+  userId: string,
+) {
+  try {
+    const { data, error } = await supabase
+      .from('inventory_logs')
+      .insert([
+        {
+          item_id: itemId,
+          item_name: itemName,
+          type,
+          quantity,
+          unit,
+          reason,
+          user_id: userId,
+          timestamp: new Date().toISOString(),
+        },
+      ])
+      .select();
+
+    if (error) throw error;
+    return { success: true, data };
+  } catch (error) {
+    console.error('Error logging inventory transaction:', error);
     return { success: false, error };
   }
 }
