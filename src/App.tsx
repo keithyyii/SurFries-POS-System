@@ -232,7 +232,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
 
   // Data
-  const [products, setProducts] = useState<Product[]>(INITIAL_PRODUCTS);
+  const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>(INITIAL_INGREDIENTS);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -330,8 +330,14 @@ export default function App() {
         const result = await supabaseFetchProducts();
         
         if (result.success && result.data && result.data.length > 0) {
+          // Filter to only the 8 main products by ID (47-54 are the latest clean ones)
+          // or by checking they're in our expected product list
+          const MAIN_PRODUCTS = ['Tagapagmana', 'Nakakaluwag', 'Rich Kid', 'Poorita', 'Contractor', 'Iced Tea', 'Coke', 'Dipping Sauce'];
+          
+          const filteredProducts = result.data.filter((p: any) => MAIN_PRODUCTS.includes(p.name));
+          
           // Convert Supabase products to app format
-          const supabaseProducts = result.data.map((p: any) => ({
+          const supabaseProducts = filteredProducts.map((p: any) => ({
             id: String(p.id), // Use Supabase ID as string
             name: p.name,
             price: p.price,
@@ -396,9 +402,17 @@ export default function App() {
               name: item.products?.name || `Product ${item.product_id}`,
               quantity: item.quantity || 1,
               price: item.price || 0,
+              category: (item.products?.category as Category) || 'fries',
+              cost: item.products?.cost || 0,
+              size: (item.products?.size ?? 'medium') as Product['size'],
+              flavor: (item.products?.flavor ?? 'classic') as Product['flavor'],
+              image: item.products?.image_url || PLACEHOLDER_IMG,
+              available: true,
+              stock: item.products?.stock || 0,
+              lowStockThreshold: item.products?.low_stock_threshold || 10,
             })),
             subtotal: subtotal,
-            total: order.total_amount || 0,
+            total: order.total_amount || subtotal,
             paymentMethod: 'cash' as PaymentMethod,
             cashierName: 'System',
             cashierId: 'system',
@@ -668,6 +682,7 @@ export default function App() {
     if (!newProduct.stock || isNaN(Number(newProduct.stock))) { setProductFormError('Enter a valid stock quantity.'); return; }
 
     if (editProduct) {
+      const imageUrl = (newProduct.image || '').trim();
       const updatedProduct = {
         name: newProduct.name.trim(),
         category: newProduct.category,
@@ -675,10 +690,12 @@ export default function App() {
         cost: Number(newProduct.cost) || 0,
         size: newProduct.size,
         flavor: newProduct.flavor,
-        image: newProduct.image || PLACEHOLDER_IMG,
+        image: imageUrl || PLACEHOLDER_IMG,
         stock: Number(newProduct.stock),
         lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
       };
+
+      console.log('🖼️ Updating product with image URL:', imageUrl);
 
       // Update in Supabase
       const result = await supabaseUpdateProduct(editProduct.id, updatedProduct as any);
@@ -696,7 +713,7 @@ export default function App() {
         cost: Number(newProduct.cost) || 0,
         size: newProduct.size,
         flavor: newProduct.flavor,
-        image: newProduct.image || PLACEHOLDER_IMG,
+        image: imageUrl || PLACEHOLDER_IMG,
         stock: Number(newProduct.stock),
         lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
       } : p));
@@ -1294,7 +1311,7 @@ export default function App() {
                 key={product.id}
                 onClick={() => addToCart(product)}
                 className={cn(
-                  'group bg-white p-3 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md hover:border-orange-100 transition-all cursor-pointer relative overflow-hidden',
+                  'group bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md hover:border-orange-100 transition-all cursor-pointer relative flex flex-col h-full',
                   (!product.available || product.stock <= 0) && 'opacity-60 grayscale cursor-not-allowed',
                 )}
               >
@@ -1303,18 +1320,27 @@ export default function App() {
                     <span className="text-[9px] bg-rose-500 text-white rounded-md px-1.5 py-0.5 font-bold">LOW</span>
                   </div>
                 )}
-                <div className="aspect-square rounded-xl overflow-hidden mb-3">
-                  <img src={product.image} alt={product.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                <div className="aspect-square rounded-t-xl overflow-hidden bg-slate-100">
+                  <img 
+                    src={product.image} 
+                    alt={product.name} 
+                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" 
+                    onError={(e) => {
+                      e.currentTarget.src = PLACEHOLDER_IMG;
+                    }}
+                  />
                 </div>
-                <h4 className="font-bold text-slate-900 text-sm line-clamp-1">{product.name}</h4>
-                <div className="flex justify-between items-center mt-1">
-                  <span className="text-orange-600 font-bold">{formatCurrency(product.price)}</span>
-                  <span className={cn(
-                    'text-[10px] px-1.5 py-0.5 rounded-md font-medium',
-                    product.stock <= product.lowStockThreshold ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500',
-                  )}>
-                    {product.stock} left
-                  </span>
+                <div className="p-3 flex flex-col flex-1 justify-between">
+                  <h4 className="font-bold text-slate-900 text-sm line-clamp-2">{product.name}</h4>
+                  <div className="flex justify-between items-center mt-2">
+                    <span className="text-orange-600 font-bold text-sm">{formatCurrency(product.price)}</span>
+                    <span className={cn(
+                      'text-[10px] px-1.5 py-0.5 rounded-md font-medium whitespace-nowrap',
+                      product.stock <= product.lowStockThreshold ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500',
+                    )}>
+                      {product.stock} left
+                    </span>
+                  </div>
                 </div>
               </motion.div>
             ))}
@@ -1821,35 +1847,35 @@ export default function App() {
 
           <h3 className="text-lg font-bold mb-6">Transaction History</h3>
           {filteredTransactions.length === 0 ? (
-            <p className="text-slate-400 text-sm text-center py-8">No transactions in selected range.</p>
+            <p className="text-slate-400 text-sm text-center py-8">No transactions match your filters.</p>
           ) : (
             <div>
               <div className="mb-4 text-sm text-slate-600">
-                Showing <span className="font-bold">{Math.min(filteredTransactions.length, 50)}</span> of <span className="font-bold">{filteredTransactions.length}</span> transactions
+                Showing <span className="font-bold">{filteredTransactions.length}</span> of <span className="font-bold">{transactions.length}</span> transactions
               </div>
-              <div className="overflow-x-auto">
+              <div className="max-h-[600px] overflow-y-auto border border-slate-200 rounded-xl">
                 <table className="w-full text-left">
-                  <thead>
+                  <thead className="sticky top-0 bg-slate-50 z-10">
                     <tr className="text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-50">
-                      <th className="pb-4">Order ID</th>
-                      <th className="pb-4">Date & Time</th>
-                      <th className="pb-4">Cashier</th>
-                      <th className="pb-4">Items</th>
-                      <th className="pb-4">Payment Method</th>
-                      <th className="pb-4 text-right">Amount</th>
+                      <th className="pb-4 px-3">Order ID</th>
+                      <th className="pb-4 px-3">Date & Time</th>
+                      <th className="pb-4 px-3">Cashier</th>
+                      <th className="pb-4 px-3">Items</th>
+                      <th className="pb-4 px-3">Payment</th>
+                      <th className="pb-4 px-3 text-right">Amount</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {filteredTransactions.slice(0, 50).map(tx => (
+                    {filteredTransactions.map(tx => (
                       <tr key={tx.id} className="text-sm hover:bg-slate-50 transition-colors">
-                        <td className="py-3 font-mono text-xs text-slate-600 font-bold">{tx.id}</td>
-                        <td className="py-3 text-slate-700">{formatDate(tx.timestamp)}</td>
-                        <td className="py-3 font-medium text-slate-900">{tx.cashierName}</td>
-                        <td className="py-3 text-slate-600">{tx.items.length} item{tx.items.length !== 1 ? 's' : ''}</td>
-                        <td className="py-3">
+                        <td className="py-3 px-3 font-mono text-xs text-slate-600 font-bold truncate">{tx.id}</td>
+                        <td className="py-3 px-3 text-slate-700">{formatDate(tx.timestamp)}</td>
+                        <td className="py-3 px-3 font-medium text-slate-900">{tx.cashierName}</td>
+                        <td className="py-3 px-3 text-slate-600">{tx.items.length} item{tx.items.length !== 1 ? 's' : ''}</td>
+                        <td className="py-3 px-3">
                           <span className="px-3 py-1 bg-orange-100 text-orange-700 rounded-lg text-[10px] font-bold uppercase">{tx.paymentMethod}</span>
                         </td>
-                        <td className="py-3 text-right font-bold text-orange-600">{formatCurrency(tx.total * 1.1)}</td>
+                        <td className="py-3 px-3 text-right font-bold text-orange-600">{formatCurrency(tx.total)}</td>
                       </tr>
                     ))}
                   </tbody>
