@@ -387,6 +387,7 @@ export default function App() {
   const [isSavingUserEdit, setIsSavingUserEdit] = useState(false);
   const [isResettingPassword, setIsResettingPassword] = useState(false);
   const [isSavingPromotion, setIsSavingPromotion] = useState(false);
+  const [showLogoutConfirmModal, setShowLogoutConfirmModal] = useState(false);
   const [showBackupSuccessModal, setShowBackupSuccessModal] = useState(false);
   const [lastBackupFileName, setLastBackupFileName] = useState('');
   const [productToDelete, setProductToDelete] = useState<Product | null>(null);
@@ -575,11 +576,16 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    setShowLogoutConfirmModal(true);
+  };
+
+  const confirmLogout = () => {
     logActivity('Logout', 'User signed out');
     logoutUser(); 
     setCurrentUser(null);
     setCart([]);
     setActiveTab('dashboard');
+    setShowLogoutConfirmModal(false);
   };
 
   const switchRole = (role: Role) => {
@@ -3285,6 +3291,38 @@ export default function App() {
                   className="w-full py-3 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-all cursor-pointer"
                 >
                   Done
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showLogoutConfirmModal && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              className="bg-white w-full max-w-sm rounded-3xl shadow-2xl border border-slate-100 overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-xl font-bold text-slate-900">Confirm Logout</h3>
+                <p className="text-sm text-slate-500 mt-2">Are you sure you want to log out?</p>
+              </div>
+              <div className="p-5 bg-slate-50 flex gap-3">
+                <button
+                  onClick={() => setShowLogoutConfirmModal(false)}
+                  className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmLogout}
+                  className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 shadow-lg shadow-orange-600/20 transition-all cursor-pointer"
+                >
+                  Log Out
                 </button>
               </div>
             </motion.div>
