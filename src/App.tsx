@@ -35,6 +35,7 @@ import {
   Eye,
   EyeOff,
   ChevronDown,
+  Menu,
   Zap,
   Lock,
   LogOut,
@@ -64,6 +65,7 @@ import {
   Ingredient,
   Promotion,
   ActivityLog,
+  InventoryLogType,
 } from './types';
 import {
   CATEGORIES,
@@ -73,9 +75,33 @@ import {
   INITIAL_PROMOTIONS,
 } from './constants';
 import { cn, formatCurrency, formatDate } from './utils';
-import { createOrder, addProduct as supabaseAddProduct, updateProduct as supabaseUpdateProduct, fetchProducts as supabaseFetchProducts, fetchOrders, deleteProduct as supabaseDeleteProduct, updateProductStockAfterOrder, logInventoryTransaction, saveIngredientStock } from './supabaseServices';
+import { 
+  processSale, 
+  addProduct as supabaseAddProduct, 
+  updateProduct as supabaseUpdateProduct, 
+  fetchProducts as supabaseFetchProducts, 
+  fetchTransactions, 
+  deleteProduct as supabaseDeleteProduct, 
+  adjustIngredientStock,
+  fetchInventoryLogs,
+  fetchIngredients,
+  addIngredient as supabaseAddIngredient,
+  fetchPromotions,
+  addPromotion as supabaseAddPromotion,
+  updatePromotion as supabaseUpdatePromotion,
+  deletePromotion as supabaseDeletePromotion,
+  fetchActivityLogs
+} from './supabaseServices';
 import { generateInsights } from './geminiService';
-import { registerUser, loginUser, logoutUser, getCurrentUser, fetchAllUsers } from './authService';
+import {
+  registerUser,
+  loginUser,
+  logoutUser,
+  getCurrentUser,
+  fetchAllUsers,
+  updateStaffAccount,
+  resetStaffPassword,
+} from './authService';
 
 // ─── tiny helpers ────────────────────────────────────────────────────────────
 
@@ -83,6 +109,76 @@ const uid = (prefix = 'ID') => `${prefix}-${Date.now()}-${Math.random().toString
 
 const PLACEHOLDER_IMG =
   'https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=400&h=400&fit=crop';
+
+const getLowStockThreshold = (item: any) =>
+  Number(item?.low_stock_threshold ?? item?.lowStockThreshold ?? 0);
+
+const getProductVelocity = (product: any) =>
+  product?.sales_velocity ?? product?.salesVelocity ?? 'normal';
+
+const getEntityImage = (entity: any) =>
+  entity?.image_url || entity?.image || PLACEHOLDER_IMG;
+
+const getUserAvatar = (user: any) =>
+  user?.avatar_url || user?.avatar || PLACEHOLDER_IMG;
+
+const getRecordTimestamp = (record: any) =>
+  record?.created_at ?? record?.timestamp ?? new Date().toISOString();
+
+const getActivityUserName = (log: any) =>
+  log?.user_name ?? log?.userName ?? 'System';
+
+const getActivityDetails = (log: any) => {
+  const action = String(log?.action ?? '').trim().toLowerCase();
+  const details = String(log?.details ?? '').trim();
+  if (!details) return 'No additional details.';
+
+  if (action === 'sale') {
+    const totalMatch = details.match(/Total:\s*([0-9]+(?:\.[0-9]+)?)/i);
+    if (totalMatch) {
+      return `Sale completed. Order total: ${formatCurrency(Number(totalMatch[1]))}.`;
+    }
+    return 'Sale completed.';
+  }
+
+  return details
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/:\s*\./g, '.')
+    .trim();
+};
+
+const getInventoryItemName = (log: any) =>
+  log?.item_name ?? log?.itemName ?? 'Unknown item';
+
+const getPromotionDiscountType = (promotion: any) =>
+  promotion?.discount_type ?? promotion?.discountType ?? 'fixed';
+
+const getTransactionItems = (tx: any): CartItem[] =>
+  (tx?.items ?? tx?.transaction_items ?? []).map((item: any) => ({
+    ...item,
+    id: String(item?.id ?? item?.product_id ?? uid('ITEM')),
+    name: item?.name ?? item?.product_name ?? 'Unknown item',
+    price: Number(item?.price ?? item?.unit_price ?? 0),
+    image_url: item?.image_url ?? item?.image ?? PLACEHOLDER_IMG,
+    quantity: Number(item?.quantity ?? 1),
+  }));
+
+const getTransactionPaymentMethod = (tx: any): PaymentMethod =>
+  tx?.payment_method === 'e-wallet'
+    ? 'gcash'
+    : tx?.payment_method === 'card'
+      ? 'cash'
+      : (tx?.payment_method ?? tx?.paymentMethod ?? 'cash');
+
+const getTransactionCashierName = (tx: any) =>
+  tx?.cashier_name ?? tx?.cashierName ?? 'System';
+
+const getTransactionDiscountCode = (tx: any) =>
+  tx?.discount_code ?? tx?.discountCode;
+
+const getTransactionLabel = (_tx: any, index: number) =>
+  `Order ${String(index + 1).padStart(3, '0')}`;
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
@@ -119,15 +215,15 @@ const SidebarItem = ({
 );
 
 const StatCard = ({ title, value, icon: Icon, trend, color }: any) => (
-  <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-    <div className="flex justify-between items-start mb-4">
-      <div className={cn('p-3 rounded-xl', color)}>
-        <Icon size={24} className="text-white" />
+  <div className="bg-white p-4 md:p-6 rounded-2xl border border-slate-100 shadow-sm">
+    <div className="flex justify-between items-start mb-3 md:mb-4">
+      <div className={cn('p-2.5 md:p-3 rounded-xl', color)}>
+        <Icon size={18} className="text-white md:w-6 md:h-6" />
       </div>
       {trend !== undefined && (
         <span
           className={cn(
-            'text-xs font-medium px-2 py-1 rounded-full',
+            'text-[11px] md:text-xs font-medium px-2 py-1 rounded-full',
             trend > 0 ? 'bg-orange-50 text-orange-600' : 'bg-rose-50 text-rose-600',
           )}
         >
@@ -136,8 +232,8 @@ const StatCard = ({ title, value, icon: Icon, trend, color }: any) => (
         </span>
       )}
     </div>
-    <h3 className="text-slate-500 text-sm font-medium">{title}</h3>
-    <p className="text-2xl font-bold text-slate-900 mt-1">{value}</p>
+    <h3 className="text-slate-500 text-[13px] md:text-sm font-medium">{title}</h3>
+    <p className="text-xl leading-tight md:text-2xl font-bold text-slate-900 mt-1">{value}</p>
   </div>
 );
 
@@ -265,10 +361,34 @@ export default function App() {
   const [stockModalType, setStockModalType] = useState<'in' | 'out' | 'waste'>('in');
   const [showAddUser, setShowAddUser] = useState(false);
   const [showRoleSwitch, setShowRoleSwitch] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [showFlavorModal, setShowFlavorModal] = useState(false);
   const [selectedProductForFlavor, setSelectedProductForFlavor] = useState<Product | null>(null);
   const [selectedFlavor, setSelectedFlavor] = useState<Product['flavor']>('classic');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showEditUserModal, setShowEditUserModal] = useState(false);
+  const [showResetPassModal, setShowResetPassModal] = useState(false);
+  const [showPromotionModal, setShowPromotionModal] = useState(false);
+  const [selectedUserForEdit, setSelectedUserForEdit] = useState<User | null>(null);
+  const [selectedUserForReset, setSelectedUserForReset] = useState<User | null>(null);
+  const [selectedPromotionForEdit, setSelectedPromotionForEdit] = useState<Promotion | null>(null);
+  const [editUserForm, setEditUserForm] = useState({ name: '', role: 'cashier' as Role, avatar_url: '' });
+  const [newPasswordForm, setNewPasswordForm] = useState({ password: '', confirmPassword: '' });
+  const [promotionForm, setPromotionForm] = useState({
+    code: '',
+    description: '',
+    discount_type: 'percentage' as Promotion['discount_type'],
+    value: '',
+    active: true,
+  });
+  const [editUserFormError, setEditUserFormError] = useState('');
+  const [resetPassFormError, setResetPassFormError] = useState('');
+  const [promotionFormError, setPromotionFormError] = useState('');
+  const [isSavingUserEdit, setIsSavingUserEdit] = useState(false);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
+  const [isSavingPromotion, setIsSavingPromotion] = useState(false);
+  const [showBackupSuccessModal, setShowBackupSuccessModal] = useState(false);
+  const [lastBackupFileName, setLastBackupFileName] = useState('');
   const [productToDelete, setProductToDelete] = useState<Product | null>(null);
 
   // Add Product form state
@@ -280,7 +400,16 @@ export default function App() {
   const [productFormError, setProductFormError] = useState('');
 
   // Stock modal form state
-  const [stockForm, setStockForm] = useState({ ingredientId: '', quantity: '', notes: '' });
+  const [stockForm, setStockForm] = useState({
+    ingredientId: '',
+    quantity: '',
+    notes: '',
+    createNewItem: false,
+    newItemName: '',
+    newItemUnit: '',
+    newItemCategory: 'raw' as Ingredient['category'],
+    newItemLowStockThreshold: '',
+  });
   const [stockFormError, setStockFormError] = useState('');
 
   // Add user form state
@@ -289,24 +418,37 @@ export default function App() {
 
   // ─── Computed helpers ────────────────────────────────────────────────────
 
-  const lowStockProducts = useMemo(() => products.filter(p => p.stock <= p.lowStockThreshold), [products]);
-  const lowStockIngredients = useMemo(() => ingredients.filter(i => i.stock <= i.lowStockThreshold), [ingredients]);
+  const lowStockProducts = useMemo(
+    () => products.filter(product => product.stock <= getLowStockThreshold(product)),
+    [products],
+  );
+  const lowStockIngredients = useMemo(
+    () => ingredients.filter(ingredient => ingredient.stock <= getLowStockThreshold(ingredient)),
+    [ingredients],
+  );
   const lowStockCount = lowStockProducts.length + lowStockIngredients.length;
+  const inventoryHistoryLogs = useMemo(
+    () => inventoryLogs.filter(log => log.item_type === 'ingredient' && log.type !== 'sale'),
+    [inventoryLogs],
+  );
 
-  const isAdmin = currentUser?.role === 'admin';
-  const isManager = currentUser?.role === 'admin' || currentUser?.role === 'manager';
+  const isAdmin = currentUser?.role === 'manager';
+  const isManager = currentUser?.role === 'manager';
+  const canAccessManagerTabs = isManager;
 
   // ─── Activity Logger ─────────────────────────────────────────────────────
 
   const logActivity = useCallback((action: string, details: string, user?: User | null) => {
     const actor = user ?? currentUser;
     if (!actor) return;
-    const entry: ActivityLog = {
+    const entry = {
       id: uid('ACT'),
-      userId: actor.id,
+      user_id: actor.id,
+      user_name: actor.name,
       userName: actor.name,
       action,
       details,
+      created_at: new Date().toISOString(),
       timestamp: new Date().toISOString(),
     };
     setActivityLogs(prev => [entry, ...prev.slice(0, 199)]);
@@ -315,139 +457,117 @@ export default function App() {
   // ─── Restore User Session on App Load ────────────────────────────────
 
   useEffect(() => {
-    const sessionUser = getCurrentUser();
-    if (sessionUser) {
-      setCurrentUser(sessionUser);
-      logActivity('Session Restored', 'User automatically logged in from session');
+    const checkSession = async () => {
+      const sessionUser = await getCurrentUser();
+      if (sessionUser) {
+        setCurrentUser(sessionUser);
+        logActivity('Session Restored', 'User automatically logged in from session', sessionUser);
+      }
+    };
+    checkSession();
+  }, []);
+
+  useEffect(() => {
+    if (!canAccessManagerTabs && ['products', 'inventory', 'reports', 'users'].includes(activeTab)) {
+      setActiveTab('sales');
     }
-  }, []);
-
-  // ─── Load Products from Supabase ──────────────────────────────────────
+  }, [activeTab, canAccessManagerTabs]);
 
   useEffect(() => {
-    const loadSupabaseProducts = async () => {
+    if (currentUser?.role === 'cashier') {
+      setActiveTab('sales');
+    }
+  }, [currentUser]);
+
+  // ─── Load Initial Data from Supabase ──────────────────────────────────
+
+  useEffect(() => {
+    const loadData = async () => {
       try {
-        const result = await supabaseFetchProducts();
-        
-        if (result.success && result.data && result.data.length > 0) {
-          // Convert Supabase products to app format
-          const supabaseProducts = result.data.map((p: any) => ({
-            id: String(p.id), // Use Supabase ID as string
-            name: p.name,
-            price: p.price,
-            cost: p.cost || 0,
-            category: p.category as Category,
-            size: (p.size || 'medium') as Product['size'],
-            flavor: (p.flavor || 'classic') as Product['flavor'],
-            image: p.image_url || PLACEHOLDER_IMG,
-            available: p.available !== false,
-            stock: p.stock || 0,
-            lowStockThreshold: p.low_stock_threshold || 10,
-            salesVelocity: 'normal' as const,
+        // Products
+        const prodRes = await supabaseFetchProducts();
+        if (prodRes.success && prodRes.data) {
+          setProducts(
+            prodRes.data
+              .filter((product: any) => product.category !== 'combos')
+              .map((product: any) => ({
+                ...product,
+                image: product.image_url,
+                lowStockThreshold: product.low_stock_threshold,
+                salesVelocity: product.sales_velocity,
+              })),
+          );
+        }
+
+        // Transactions
+        const txRes = await fetchTransactions();
+        if (txRes.success && txRes.data) {
+          // Map database transactions to app format if needed, 
+          // but our Transaction interface now aligns with the schema.
+          const mappedTx: Transaction[] = txRes.data.map((tx: any) => ({
+            ...tx,
+            timestamp: tx.created_at, // for backward compatibility in components
+            paymentMethod: tx.payment_method,
+            cashierName: tx.cashier_name,
+            discountCode: tx.discount_code,
+            items: tx.transaction_items.map((item: any) => ({
+              ...item,
+              id: item.product_id,
+              name: item.product_name,
+              price: item.unit_price,
+              image: item.image_url, // map for display
+            }))
           }));
-          setProducts(supabaseProducts);
+          setTransactions(mappedTx);
+        }
+
+        // Ingredients
+        const ingRes = await fetchIngredients();
+        if (ingRes.success && ingRes.data) {
+          setIngredients(ingRes.data.map((ingredient: any) => ({
+            ...ingredient,
+            lowStockThreshold: ingredient.low_stock_threshold,
+          })));
+        }
+
+        // Inventory Logs
+        const invRes = await fetchInventoryLogs();
+        if (invRes.success && invRes.data) {
+          setInventoryLogs(invRes.data.map((log: any) => ({
+            ...log,
+            quantity: Number(log.quantity ?? 0),
+          })));
+        }
+
+        // Promotions
+        const promoRes = await fetchPromotions();
+        if (promoRes.success && promoRes.data) {
+          setPromotions(promoRes.data.map((promotion: any) => ({
+            ...promotion,
+            discountType: promotion.discount_type,
+          })));
+        }
+
+        // Activity Logs
+        const actRes = await fetchActivityLogs();
+        if (actRes.success && actRes.data) {
+          setActivityLogs(actRes.data.map((log: any) => ({
+            ...log,
+            userName: log.user_name,
+            timestamp: log.created_at,
+          })));
         }
       } catch (error) {
-        console.error('Error loading products from Supabase:', error);
+        console.error('Error loading initial data:', error);
       }
     };
 
-    loadSupabaseProducts();
-  }, []);
-
-  // ─── Load Orders from Supabase ──────────────────────────────────────
-
-  useEffect(() => {
-    const loadSupabaseOrders = async () => {
-      try {
-        const result = await fetchOrders();
-        
-        console.log('Fetch orders result:', result);
-        
-        if (!result.success) {
-          console.error('Failed to fetch orders:', result.error);
-          return;
-        }
-
-        if (!result.data) {
-          console.log('No orders found');
-          setTransactions([]);
-          return;
-        }
-
-        // result.data should be an array of orders with nested order_items
-        const orders = Array.isArray(result.data) ? result.data : [];
-        console.log('Orders from Supabase:', orders);
-
-        if (orders.length === 0) {
-          setTransactions([]);
-          return;
-        }
-
-        // Convert Supabase orders to Transaction format
-        const supabaseTransactions = orders.map((order: any) => {
-          const items = Array.isArray(order.order_items) ? order.order_items : [];
-          const subtotal = items.reduce((sum: number, item: any) => sum + (item.price || 0) * (item.quantity || 1), 0);
-          return {
-            id: order.order_number,
-            timestamp: order.created_at,
-            items: items.map((item: any) => ({
-              id: String(item.product_id),
-              name: item.products?.name || `Product ${item.product_id}`,
-              quantity: item.quantity || 1,
-              price: item.price || 0,
-            })),
-            subtotal: subtotal,
-            total: order.total_amount || 0,
-            paymentMethod: 'cash' as PaymentMethod,
-            cashierName: 'System',
-            cashierId: 'system',
-            status: 'completed' as const,
-            discount: 0,
-          };
-        });
-        
-        console.log('Converted transactions:', supabaseTransactions);
-        setTransactions(supabaseTransactions);
-      } catch (error) {
-        console.error('Error loading orders from Supabase:', error);
-      }
-    };
-
-    loadSupabaseOrders();
-  }, []);
+    if (currentUser) {
+      loadData();
+    }
+  }, [currentUser]);
 
   // ─── Fetch AI Insights ───────────────────────────────────────────────
-
-  const fetchInsights = async () => {
-    if (!import.meta.env.VITE_GEMINI_API_KEY) {
-      setInsightsError('Gemini API key not configured. Add VITE_GEMINI_API_KEY to .env.local');
-      return;
-    }
-
-    setInsightsLoading(true);
-    setInsightsError(null);
-
-    try {
-      const reportData = {
-        transactionCount: filteredTransactions.length,
-        totalRevenue: reportRevenue,
-        totalDiscount: reportDiscount,
-        avgOrderValue,
-        topProducts,
-        categoryBreakdown,
-        transactions: filteredTransactions,
-      };
-
-      const insightsText = await generateInsights(reportData);
-      setInsights(insightsText);
-    } catch (error) {
-      console.error('Error fetching insights:', error);
-      setInsightsError('Failed to generate insights. Check console for details.');
-    } finally {
-      setInsightsLoading(false);
-    }
-  };
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
@@ -456,15 +576,19 @@ export default function App() {
 
   const handleLogout = () => {
     logActivity('Logout', 'User signed out');
-    logoutUser(); // Clear session storage
+    logoutUser(); 
     setCurrentUser(null);
     setCart([]);
     setActiveTab('dashboard');
   };
 
   const switchRole = (role: Role) => {
-    // Removed demo switchRole - now users must logout and create new account
     alert('To switch roles, please logout and create/login with a different account.');
+  };
+
+  const navigateTo = (tab: string) => {
+    setActiveTab(tab);
+    setMobileSidebarOpen(false);
   };
 
   // ─── Cart Logic ──────────────────────────────────────────────────────────
@@ -472,7 +596,6 @@ export default function App() {
   const addToCart = (product: Product) => {
     if (!product.available || product.stock <= 0) return;
     
-    // Show flavor modal for fries
     if (product.category === 'fries') {
       setSelectedProductForFlavor(product);
       setSelectedFlavor('classic');
@@ -480,7 +603,6 @@ export default function App() {
       return;
     }
     
-    // Add other products directly
     setCart(prev => {
       const existing = prev.find(item => item.id === product.id);
       if (existing) {
@@ -533,12 +655,14 @@ export default function App() {
 
   const cartDiscount = useMemo(() => {
     if (!appliedPromo) return 0;
-    return appliedPromo.discountType === 'percentage'
+    return appliedPromo.discount_type === 'percentage'
       ? (cartSubtotal * appliedPromo.value) / 100
       : appliedPromo.value;
   }, [cartSubtotal, appliedPromo]);
 
-  const cartTotal = Math.max(0, cartSubtotal - cartDiscount);
+  const cartNet = Math.max(0, cartSubtotal - cartDiscount);
+  const cartTax = Math.round(cartNet * 0.10 * 100) / 100;
+  const cartTotal = Math.round((cartNet + cartTax) * 100) / 100;
 
   const applyPromoCode = () => {
     const promo = promotions.find(
@@ -560,85 +684,81 @@ export default function App() {
     
     setIsProcessingOrder(true);
 
-    const tx: Transaction = {
-      id: uid('TX'),
-      items: [...cart],
-      subtotal: cartSubtotal,
-      discount: cartDiscount,
-      discountCode: appliedPromo?.code,
-      total: cartTotal,
-      paymentMethod: method,
-      status: 'completed',
-      timestamp: new Date().toISOString(),
-      cashierId: currentUser.id,
-      cashierName: currentUser.name,
-    };
-
-    // Save order to Supabase
-    const orderResult = await createOrder(
-      cart,
-      method,
-      cartTotal,
-      cartDiscount,
-      appliedPromo?.code,
-    );
-
-    setIsProcessingOrder(false);
-
-    if (!orderResult.success) {
-      console.error('Failed to save order to Supabase:', orderResult.error);
-      alert('Error saving order to database. Please try again.');
-      return;
-    }
-
-    // Deduct product stock and sync to Supabase
-    setProducts(prev =>
-      prev.map(p => {
-        const ci = cart.find(c => c.id === p.id);
-        if (ci) {
-          // Update in Supabase
-          updateProductStockAfterOrder(p.id, ci.quantity).catch(err =>
-            console.error(`Failed to sync stock for product ${p.id}:`, err),
-          );
-          return { ...p, stock: p.stock - ci.quantity };
-        }
-        return p;
-      }),
-    );
-
-    // Create inventory logs and sync to Supabase
-    const newLogs: InventoryLog[] = cart.map(item => {
-      const log: InventoryLog = {
-        id: uid('LOG'),
-        itemId: item.id,
-        itemName: item.name,
-        type: 'sale',
-        quantity: item.quantity,
-        unit: 'pcs',
-        timestamp: new Date().toISOString(),
-        reason: `Sale ${tx.id}`,
-        userId: currentUser.id,
-      };
-      // Sync to database
-      logInventoryTransaction(
-        item.id,
-        item.name,
-        'sale',
-        item.quantity,
-        'pcs',
-        `Sale ${tx.id}`,
+    try {
+      const orderResult = await processSale(
         currentUser.id,
-      ).catch(err => console.error('Failed to log inventory:', err));
-      return log;
-    });
+        method,
+        cart,
+        cartSubtotal,
+        cartTax,
+        cartTotal,
+        cartDiscount,
+        appliedPromo?.code,
+      );
 
-    setInventoryLogs(prev => [...newLogs, ...prev]);
-    setTransactions(prev => [tx, ...prev]);
-    logActivity('Sale', `Processed order ${tx.id} for ${formatCurrency(tx.total)} via ${method}`);
-    setCart([]);
-    setAppliedPromo(null);
-    setPromoError('');
-    setShowReceipt(tx);
+      setIsProcessingOrder(false);
+
+      if (!orderResult.success) {
+        console.error('Failed to process sale:', orderResult.error);
+        alert(`Error processing sale: ${(orderResult.error as any)?.message || 'Unknown error'}`);
+        return;
+      }
+
+      // Success! Update local state
+      const tx = orderResult.data;
+      
+      // Update local products stock
+      setProducts(prev =>
+        prev.map(p => {
+          const ci = cart.find(c => c.id === p.id);
+          return ci ? { ...p, stock: p.stock - ci.quantity } : p;
+        })
+      );
+
+      setTransactions(prev => [{
+        ...tx,
+        timestamp: tx.created_at,
+        paymentMethod: tx.payment_method,
+        cashierName: tx.cashier_name,
+        discountCode: tx.discount_code,
+        items: [...cart]
+      }, ...prev]);
+
+      setCart([]);
+      setAppliedPromo(null);
+      setPromoError('');
+      setShowReceipt({
+        ...tx,
+        timestamp: tx.created_at,
+        paymentMethod: tx.payment_method,
+        discountCode: tx.discount_code,
+        items: [...cart]
+      });
+
+      // Refresh activity logs
+      const actRes = await fetchActivityLogs();
+      if (actRes.success && actRes.data) {
+        setActivityLogs(actRes.data.map((log: any) => ({
+          ...log,
+          userName: log.user_name,
+          timestamp: log.created_at,
+        })));
+      }
+
+      // Refresh inventory logs (sale deductions are logged by process_sale RPC)
+      const invRes = await fetchInventoryLogs();
+      if (invRes.success && invRes.data) {
+        setInventoryLogs(invRes.data.map((log: any) => ({
+          ...log,
+          quantity: Number(log.quantity ?? 0),
+        })));
+      }
+
+    } catch (error) {
+      console.error('Error in processOrder:', error);
+      setIsProcessingOrder(false);
+      alert('An unexpected error occurred while placing the order.');
+    }
   };
 
   // ─── Products: Add / Edit / Toggle ───────────────────────────────────────
@@ -653,8 +773,8 @@ export default function App() {
   const openEditProduct = (p: Product) => {
     setNewProduct({
       name: p.name, category: p.category, price: String(p.price), cost: String(p.cost),
-      size: p.size, flavor: p.flavor, image: p.image || '', stock: String(p.stock),
-      lowStockThreshold: String(p.lowStockThreshold),
+      size: p.size, flavor: p.flavor, image: p.image_url || '', stock: String(p.stock),
+      lowStockThreshold: String(p.low_stock_threshold),
     });
     setProductFormError('');
     setEditProduct(p);
@@ -663,73 +783,40 @@ export default function App() {
 
   const saveProduct = async () => {
     if (!newProduct.name.trim()) { setProductFormError('Product name is required.'); return; }
-    if (!newProduct.price || isNaN(Number(newProduct.price)) || Number(newProduct.price) < 0) { setProductFormError('Enter a valid price.'); return; }
-    if (!newProduct.cost || isNaN(Number(newProduct.cost)) || Number(newProduct.cost) < 0) { setProductFormError('Enter a valid cost.'); return; }
+    if (!newProduct.price || isNaN(Number(newProduct.price))) { setProductFormError('Enter a valid price.'); return; }
     if (!newProduct.stock || isNaN(Number(newProduct.stock))) { setProductFormError('Enter a valid stock quantity.'); return; }
 
+    const productData: any = {
+      name: newProduct.name.trim(),
+      category: newProduct.category,
+      price: Number(newProduct.price),
+      cost: Number(newProduct.cost) || 0,
+      size: newProduct.size,
+      flavor: newProduct.flavor,
+      image_url: newProduct.image || PLACEHOLDER_IMG,
+      stock: Number(newProduct.stock),
+      low_stock_threshold: Number(newProduct.lowStockThreshold) || 10,
+    };
+
     if (editProduct) {
-      const updatedProduct = {
-        name: newProduct.name.trim(),
-        category: newProduct.category,
-        price: Number(newProduct.price),
-        cost: Number(newProduct.cost) || 0,
-        size: newProduct.size,
-        flavor: newProduct.flavor,
-        image: newProduct.image || PLACEHOLDER_IMG,
-        stock: Number(newProduct.stock),
-        lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
-      };
-
-      // Update in Supabase
-      const result = await supabaseUpdateProduct(editProduct.id, updatedProduct as any);
+      const result = await supabaseUpdateProduct(editProduct.id, productData);
       if (!result.success) {
-        setProductFormError('Failed to update product in database.');
-        console.error(result.error);
+        setProductFormError(`Failed to update product: ${(result.error as any)?.message}`);
         return;
       }
-
-      setProducts(prev => prev.map(p => p.id === editProduct.id ? {
-        ...p,
-        name: newProduct.name.trim(),
-        category: newProduct.category,
-        price: Number(newProduct.price),
-        cost: Number(newProduct.cost) || 0,
-        size: newProduct.size,
-        flavor: newProduct.flavor,
-        image: newProduct.image || PLACEHOLDER_IMG,
-        stock: Number(newProduct.stock),
-        lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
-      } : p));
-      logActivity('Product Edit', `Updated product: ${newProduct.name}`);
+      setProducts(prev => prev.map(p => p.id === editProduct.id ? { ...p, ...productData } : p));
     } else {
-      const prod: Product = {
-        id: '', // Will be updated with the real ID from Supabase below
-        name: newProduct.name.trim(),
-        category: newProduct.category,
-        price: Number(newProduct.price),
-        cost: Number(newProduct.cost) || 0,
-        size: newProduct.size,
-        flavor: newProduct.flavor,
-        image: newProduct.image || PLACEHOLDER_IMG,
+      const result = await supabaseAddProduct({
+        ...productData,
         available: true,
-        stock: Number(newProduct.stock),
-        lowStockThreshold: Number(newProduct.lowStockThreshold) || 10,
-        salesVelocity: 'normal',
-      };
-
-      // Add to Supabase
-      const result = await supabaseAddProduct(prod);
+        ingredients: [],
+        sales_velocity: 'normal'
+      });
       if (!result.success || !result.data) {
-        console.error('Product add failed. Error object:', result.error);
-        const errorMsg = (result.error as any)?.message || 'Unknown database error';
-        setProductFormError(`Database Error: ${errorMsg}`);
+        setProductFormError(`Failed to add product: ${(result.error as any)?.message}`);
         return;
       }
-
-      // Use the real ID returned from Supabase
-      const newDbProduct = result.data[0];
-      setProducts(prev => [...prev, { ...prod, id: String(newDbProduct.id) }]);
-      logActivity('Product Add', `Added new product: ${prod.name}`);
+      setProducts(prev => [...prev, result.data[0]]);
     }
     setShowAddProduct(false);
   };
@@ -773,53 +860,93 @@ export default function App() {
 
   const openStockModal = (type: 'in' | 'out' | 'waste') => {
     setStockModalType(type);
-    setStockForm({ ingredientId: ingredients[0]?.id || '', quantity: '', notes: '' });
+    setStockForm({
+      ingredientId: ingredients[0]?.id || '',
+      quantity: '',
+      notes: '',
+      createNewItem: false,
+      newItemName: '',
+      newItemUnit: '',
+      newItemCategory: 'raw',
+      newItemLowStockThreshold: '',
+    });
     setStockFormError('');
     setShowStockModal(true);
   };
 
   const submitStock = async () => {
     const qty = Number(stockForm.quantity);
-    if (!stockForm.ingredientId) { setStockFormError('Select an ingredient.'); return; }
     if (!qty || qty <= 0) { setStockFormError('Enter a valid quantity.'); return; }
 
-    const ing = ingredients.find(i => i.id === stockForm.ingredientId);
-    if (!ing) return;
+    let targetIngredient = ingredients.find(i => i.id === stockForm.ingredientId);
 
-    const newStock = stockModalType === 'in' ? ing.stock + qty : Math.max(0, ing.stock - qty);
+    if (stockModalType === 'in' && stockForm.createNewItem) {
+      if (!stockForm.newItemName.trim()) { setStockFormError('Enter stock item name.'); return; }
+      if (!stockForm.newItemUnit.trim()) { setStockFormError('Enter unit (e.g. kg, pcs, L).'); return; }
 
-    // Update local state
+      const addRes = await supabaseAddIngredient({
+        name: stockForm.newItemName.trim(),
+        unit: stockForm.newItemUnit.trim(),
+        category: stockForm.newItemCategory,
+        low_stock_threshold: Number(stockForm.newItemLowStockThreshold || 0),
+        stock: 0,
+      });
+      if (!addRes.success || !addRes.data?.[0]) {
+        setStockFormError('Failed to add new stock item.');
+        return;
+      }
+
+      targetIngredient = {
+        ...addRes.data[0],
+        lowStockThreshold: addRes.data[0].low_stock_threshold,
+      } as any;
+
+      const ingRes = await fetchIngredients();
+      if (ingRes.success && ingRes.data) {
+        setIngredients(ingRes.data.map((ingredient: any) => ({
+          ...ingredient,
+          lowStockThreshold: ingredient.low_stock_threshold,
+        })));
+      }
+    }
+
+    if (!targetIngredient) { setStockFormError('Select an ingredient.'); return; }
+
+    const newStock = stockModalType === 'in'
+      ? targetIngredient.stock + qty
+      : Math.max(0, targetIngredient.stock - qty);
+
+    // Sync to Supabase using the consolidated RPC
+    const stockResult = await adjustIngredientStock(
+      targetIngredient.id,
+      stockModalType as InventoryLogType,
+      qty,
+      stockForm.notes || (stockModalType === 'in' ? 'Stock replenishment' : 'Adjustment'),
+      currentUser?.id || ''
+    );
+    if (!stockResult.success) {
+      setStockFormError('Failed to save inventory log. Please try again.');
+      return;
+    }
+
+    // Update local stock only after DB save succeeds
     setIngredients(prev => prev.map(i => {
-      if (i.id !== stockForm.ingredientId) return i;
+      if (i.id !== targetIngredient.id) return i;
       return { ...i, stock: newStock };
     }));
 
-    const log: InventoryLog = {
-      id: uid('LOG'),
-      itemId: ing.id, itemName: ing.name,
-      type: stockModalType === 'in' ? 'in' : stockModalType === 'waste' ? 'waste' : 'out',
-      quantity: qty, unit: ing.unit,
-      timestamp: new Date().toISOString(),
-      reason: stockForm.notes || (stockModalType === 'in' ? 'Stock replenishment' : 'Adjustment'),
-      userId: currentUser?.id || '',
-    };
-    setInventoryLogs(prev => [log, ...prev]);
-
-    // Sync to Supabase
-    await saveIngredientStock(ing.id, newStock, stockForm.notes || 'Stock adjustment');
-    await logInventoryTransaction(
-      ing.id,
-      ing.name,
-      stockModalType === 'in' ? 'in' : stockModalType === 'waste' ? 'waste' : 'out',
-      qty,
-      ing.unit,
-      stockForm.notes || (stockModalType === 'in' ? 'Stock replenishment' : 'Adjustment'),
-      currentUser?.id || '',
-    ).catch(err => console.error('Failed to log inventory to database:', err));
+    // Refresh from database so logs are retained after reload
+    const invRes = await fetchInventoryLogs();
+    if (invRes.success && invRes.data) {
+      setInventoryLogs(invRes.data.map((log: any) => ({
+        ...log,
+        quantity: Number(log.quantity ?? 0),
+      })));
+    }
 
     logActivity(
       stockModalType === 'in' ? 'Stock In' : stockModalType === 'waste' ? 'Waste Recorded' : 'Stock Out',
-      `${stockModalType === 'in' ? '+' : '-'}${qty} ${ing.unit} of ${ing.name}`,
+      `${stockModalType === 'in' ? '+' : '-'}${qty} ${targetIngredient.unit} of ${targetIngredient.name}`,
     );
     setShowStockModal(false);
   };
@@ -836,11 +963,12 @@ export default function App() {
         if (result.success && result.data) {
           setUsers(result.data.map((u: any) => ({
             id: u.id,
+            auth_user_id: u.auth_user_id ?? '',
             name: u.name,
             email: u.email,
             role: u.role,
-            avatar: u.avatar,
-            lastLogin: u.last_login,
+            avatar_url: u.avatar_url,
+            last_login: u.last_login,
           })));
         }
       };
@@ -860,8 +988,9 @@ export default function App() {
     const result = await registerUser(newUser.name.trim(), newUser.email.trim().toLowerCase(), newUser.password, newUser.role);
     
     if (result.success && result.data) {
-      setUsers(prev => [...prev, result.data as User]);
-      logActivity('User Add', `Added new user: ${result.data.name} (${result.data.role})`);
+      const addedUser = result.data as User;
+      setUsers(prev => [...prev, addedUser]);
+      logActivity('User Add', `Added new user: ${addedUser.name} (${addedUser.role})`);
       setShowAddUser(false);
       setNewUser({ name: '', email: '', role: 'cashier', password: '' });
       setUserFormError('');
@@ -870,7 +999,212 @@ export default function App() {
     }
   };
 
+  const openEditUserModal = (user: User) => {
+    if (!isAdmin) return;
+    setSelectedUserForEdit(user);
+    setEditUserForm({
+      name: user.name,
+      role: user.role,
+      avatar_url: user.avatar_url || '',
+    });
+    setEditUserFormError('');
+    setShowEditUserModal(true);
+  };
+
+  const submitEditUser = async () => {
+    if (!selectedUserForEdit) return;
+    if (!editUserForm.name.trim()) {
+      setEditUserFormError('Name is required.');
+      return;
+    }
+
+    setIsSavingUserEdit(true);
+    setEditUserFormError('');
+
+    const result = await updateStaffAccount(selectedUserForEdit.id, {
+      name: editUserForm.name.trim(),
+      role: editUserForm.role,
+      avatar_url: editUserForm.avatar_url.trim() || null,
+    });
+
+    setIsSavingUserEdit(false);
+
+    if (!result.success || !result.data) {
+      const message = (result.error as any)?.message || 'Failed to update user.';
+      setEditUserFormError(message);
+      return;
+    }
+
+    const updated = result.data as any;
+    setUsers(prev =>
+      prev.map(u =>
+        u.id === updated.id
+          ? {
+            ...u,
+            name: updated.name,
+            role: updated.role,
+            avatar_url: updated.avatar_url,
+          }
+          : u,
+      ),
+    );
+
+    if (currentUser?.id === updated.id) {
+      setCurrentUser(prev =>
+        prev
+          ? {
+            ...prev,
+            name: updated.name,
+            role: updated.role,
+            avatar_url: updated.avatar_url,
+          }
+          : prev,
+      );
+    }
+
+    logActivity('User Edit', `Updated account details for ${updated.name}`);
+    setShowEditUserModal(false);
+    setSelectedUserForEdit(null);
+  };
+
+  const openResetPasswordModal = (user: User) => {
+    if (!isAdmin) return;
+    setSelectedUserForReset(user);
+    setNewPasswordForm({ password: '', confirmPassword: '' });
+    setResetPassFormError('');
+    setShowResetPassModal(true);
+  };
+
+  const submitResetPassword = async () => {
+    if (!selectedUserForReset) return;
+    if (!newPasswordForm.password || newPasswordForm.password.length < 8) {
+      setResetPassFormError('Password must be at least 8 characters.');
+      return;
+    }
+    if (newPasswordForm.password !== newPasswordForm.confirmPassword) {
+      setResetPassFormError('Passwords do not match.');
+      return;
+    }
+
+    setIsResettingPassword(true);
+    setResetPassFormError('');
+
+    const result = await resetStaffPassword(selectedUserForReset.id, newPasswordForm.password);
+
+    setIsResettingPassword(false);
+
+    if (!result.success) {
+      const message = (result.error as any)?.message || 'Failed to reset password.';
+      setResetPassFormError(message);
+      return;
+    }
+
+    logActivity('Password Reset', `Manager reset password for ${selectedUserForReset.name}`);
+    setShowResetPassModal(false);
+    setSelectedUserForReset(null);
+  };
+
   // ─── Export & Backup Handlers ──────────────────────────────────────────────
+
+  const refreshPromotions = useCallback(async () => {
+    const promoRes = await fetchPromotions();
+    if (promoRes.success && promoRes.data) {
+      setPromotions(promoRes.data.map((promotion: any) => ({
+        ...promotion,
+        discountType: promotion.discount_type,
+      })));
+    }
+  }, []);
+
+  const openAddPromotionModal = () => {
+    if (!isManager) return;
+    setSelectedPromotionForEdit(null);
+    setPromotionForm({
+      code: '',
+      description: '',
+      discount_type: 'percentage',
+      value: '',
+      active: true,
+    });
+    setPromotionFormError('');
+    setShowPromotionModal(true);
+  };
+
+  const openEditPromotionModal = (promotion: Promotion) => {
+    if (!isManager) return;
+    setSelectedPromotionForEdit(promotion);
+    setPromotionForm({
+      code: promotion.code,
+      description: promotion.description,
+      discount_type: getPromotionDiscountType(promotion) as Promotion['discount_type'],
+      value: String(promotion.value),
+      active: promotion.active,
+    });
+    setPromotionFormError('');
+    setShowPromotionModal(true);
+  };
+
+  const savePromotion = async () => {
+    if (!isManager) return;
+    if (!promotionForm.code.trim()) { setPromotionFormError('Promotion code is required.'); return; }
+    if (!promotionForm.description.trim()) { setPromotionFormError('Description is required.'); return; }
+    const value = Number(promotionForm.value);
+    if (!value || value <= 0) { setPromotionFormError('Enter a valid discount value.'); return; }
+    if (promotionForm.discount_type === 'percentage' && value > 100) {
+      setPromotionFormError('Percentage discount cannot exceed 100.');
+      return;
+    }
+
+    setIsSavingPromotion(true);
+    setPromotionFormError('');
+
+    const payload = {
+      code: promotionForm.code.trim().toUpperCase(),
+      description: promotionForm.description.trim(),
+      discount_type: promotionForm.discount_type,
+      value,
+      active: promotionForm.active,
+    };
+
+    const result = selectedPromotionForEdit
+      ? await supabaseUpdatePromotion(selectedPromotionForEdit.id, payload)
+      : await supabaseAddPromotion(payload);
+
+    setIsSavingPromotion(false);
+
+    if (!result.success) {
+      const message = (result.error as any)?.message || 'Failed to save promotion.';
+      setPromotionFormError(message);
+      return;
+    }
+
+    await refreshPromotions();
+    logActivity(
+      selectedPromotionForEdit ? 'Promotion Edit' : 'Promotion Add',
+      selectedPromotionForEdit
+        ? `Updated promo ${payload.code}`
+        : `Created promo ${payload.code}`,
+    );
+    setShowPromotionModal(false);
+    setSelectedPromotionForEdit(null);
+  };
+
+  const togglePromotionActive = async (promotion: Promotion) => {
+    if (!isManager) return;
+    const result = await supabaseUpdatePromotion(promotion.id, { active: !promotion.active });
+    if (!result.success) return;
+    await refreshPromotions();
+    logActivity('Promotion Toggle', `${promotion.code} set to ${promotion.active ? 'inactive' : 'active'}`);
+  };
+
+  const deletePromotion = async (promotion: Promotion) => {
+    if (!isManager) return;
+    if (!window.confirm(`Delete promotion \"${promotion.code}\"?`)) return;
+    const result = await supabaseDeletePromotion(promotion.id);
+    if (!result.success) return;
+    await refreshPromotions();
+    logActivity('Promotion Delete', `Deleted promo ${promotion.code}`);
+  };
 
   const exportPDF = () => {
     // Simple PDF export - creates a printable report
@@ -878,7 +1212,7 @@ export default function App() {
     if (!reportWindow) return;
     
     const productRows = topProducts
-      .map(p => `<tr><td>${p.name}</td><td>${p.qty}</td><td>$${p.revenue.toFixed(2)}</td></tr>`)
+      .map(p => `<tr><td>${p.name}</td><td>${p.qty}</td><td>${formatCurrency(p.revenue)}</td></tr>`)
       .join('');
 
     const reportHTML = `
@@ -903,9 +1237,9 @@ export default function App() {
           <div class="summary">
             <h2>Report Summary</h2>
             <p><strong>Total Transactions:</strong> ${filteredTransactions.length}</p>
-            <p><strong>Total Revenue:</strong> $${reportRevenue.toFixed(2)}</p>
-            <p><strong>Total Discounts:</strong> $${reportDiscount.toFixed(2)}</p>
-            <p><strong>Average Order Value:</strong> $${avgOrderValue.toFixed(2)}</p>
+            <p><strong>Total Revenue:</strong> ${formatCurrency(reportRevenue)}</p>
+            <p><strong>Total Discounts:</strong> ${formatCurrency(reportDiscount)}</p>
+            <p><strong>Average Order Value:</strong> ${formatCurrency(avgOrderValue)}</p>
           </div>
 
           <h2>Top Selling Products</h2>
@@ -932,36 +1266,410 @@ export default function App() {
   };
 
   const exportExcel = () => {
-    // Simple CSV export (can be opened in Excel)
-    const rows = [
-      ['Product', 'Qty Sold', 'Revenue'],
-      ...topProducts.map(p => [p.name, p.qty, p.revenue.toFixed(2)]),
-      [],
-      ['Summary'],
-      ['Total Revenue', reportRevenue.toFixed(2)],
-      ['Total Transactions', filteredTransactions.length],
-      ['Average Order Value', avgOrderValue.toFixed(2)],
-    ];
-    
-    const csvContent = rows
-      .map(row => row.join(','))
-      .join('\n');
+    const now = new Date();
+    const fileDate = now.toISOString().slice(0, 10);
+    const generatedAt = now.toLocaleString();
 
-    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const escapeHtml = (value: unknown) =>
+      String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+
+    const formatExcelPeso = (amount: number) =>
+      `&#8369; ${Number(amount).toLocaleString('en-PH', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+
+    const topProductRows = (topProducts.length ? topProducts : [])
+      .map(
+        (p, idx) => `
+          <tr>
+            <td class="rank">${idx + 1}</td>
+            <td>${escapeHtml(p.name)}</td>
+            <td class="num">${p.qty.toLocaleString()}</td>
+            <td class="num">${formatExcelPeso(p.revenue)}</td>
+          </tr>
+        `,
+      )
+      .join('');
+
+    const categoryRows = (categoryBreakdown.length ? categoryBreakdown : [])
+      .map(
+        c => `
+          <tr>
+            <td>${escapeHtml(c.name)}</td>
+            <td class="num">${c.qty.toLocaleString()}</td>
+            <td class="num">${formatExcelPeso(c.revenue)}</td>
+          </tr>
+        `,
+      )
+      .join('');
+
+    const recentRows = filteredTransactions
+      .slice(0, 12)
+      .map(
+        (tx, idx) => `
+          <tr>
+            <td>${escapeHtml(getTransactionLabel(tx, idx))}</td>
+            <td>${escapeHtml(formatDate(getRecordTimestamp(tx)))}</td>
+            <td>${escapeHtml(getTransactionCashierName(tx))}</td>
+            <td>${getTransactionItems(tx).length}</td>
+            <td>${escapeHtml(getTransactionPaymentMethod(tx).toUpperCase())}</td>
+            <td class="num">${formatExcelPeso(tx.total)}</td>
+          </tr>
+        `,
+      )
+      .join('');
+
+    const htmlReport = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
+        <head>
+          <meta charset="utf-8" />
+          <style>
+            body { font-family: Calibri, Arial, sans-serif; background:#eef2f5; padding:18px; }
+            table.sheet { border-collapse: collapse; width: 100%; background:#fbfdff; }
+            table.sheet td, table.sheet th { border:1px solid #b9c2cc; padding:8px 10px; font-size:13px; }
+            .title { background:#1f6d46; color:#fff; text-align:center; font-size:30px; font-weight:700; padding:16px; }
+            .meta-label { background:#eaf0ea; font-weight:700; text-align:right; color:#1f2937; }
+            .meta-value { background:#ffffff; font-weight:600; color:#0f172a; }
+            .section { background:#1f6d46; color:#fff; font-size:18px; font-weight:700; text-align:left; }
+            .head { background:#c7ced6; font-weight:700; text-align:center; color:#0f172a; }
+            .num { text-align:right; font-weight:700; }
+            .rank { text-align:center; font-weight:700; color:#475569; width:70px; }
+            .metric { background:#f7fafc; font-weight:700; }
+            .metric-value { background:#ffffff; font-weight:700; color:#ea580c; }
+            .footer { background:#f8fafc; color:#475569; font-style:italic; }
+          </style>
+        </head>
+        <body>
+          <table class="sheet">
+            <tr><td class="title" colspan="6">Sales Report Export</td></tr>
+            <tr>
+              <td class="meta-label">Generated:</td>
+              <td class="meta-value">${escapeHtml(generatedAt)}</td>
+              <td class="meta-label">Date Range:</td>
+              <td class="meta-value">${escapeHtml(reportRange)}</td>
+              <td class="meta-label">Category:</td>
+              <td class="meta-value">${escapeHtml(reportCategory)}</td>
+            </tr>
+
+            <tr><td class="section" colspan="6">Summary</td></tr>
+            <tr>
+              <td class="metric">Transactions</td>
+              <td class="metric-value">${filteredTransactions.length}</td>
+              <td class="metric">Revenue</td>
+              <td class="metric-value">${formatExcelPeso(reportRevenue)}</td>
+              <td class="metric">Average Order Value</td>
+              <td class="metric-value">${formatExcelPeso(avgOrderValue)}</td>
+            </tr>
+            <tr>
+              <td class="metric">Discounts Given</td>
+              <td class="metric-value">${formatExcelPeso(reportDiscount)}</td>
+              <td class="metric">Refunds</td>
+              <td class="metric-value">${reportRefunds}</td>
+              <td class="metric">Exported By</td>
+              <td class="metric-value">${escapeHtml(currentUser?.name || 'System')}</td>
+            </tr>
+
+            <tr><td class="section" colspan="6">Top Selling Products</td></tr>
+            <tr>
+              <th class="head">Rank</th>
+              <th class="head">Product</th>
+              <th class="head">Qty Sold</th>
+              <th class="head">Revenue</th>
+              <th class="head" colspan="2">Notes</th>
+            </tr>
+            ${topProductRows || '<tr><td colspan="6">No product sales data for this filter.</td></tr>'}
+
+            <tr><td class="section" colspan="6">Category Breakdown</td></tr>
+            <tr>
+              <th class="head" colspan="2">Category</th>
+              <th class="head">Units Sold</th>
+              <th class="head">Revenue</th>
+              <th class="head" colspan="2">Trend</th>
+            </tr>
+            ${categoryRows || '<tr><td colspan="6">No category data for this filter.</td></tr>'}
+
+            <tr><td class="section" colspan="6">Recent Transactions</td></tr>
+            <tr>
+              <th class="head">Order</th>
+              <th class="head">Date & Time</th>
+              <th class="head">Cashier</th>
+              <th class="head">Items</th>
+              <th class="head">Payment</th>
+              <th class="head">Amount</th>
+            </tr>
+            ${recentRows || '<tr><td colspan="6">No transactions for this filter.</td></tr>'}
+
+            <tr>
+              <td class="footer" colspan="6">Generated by SurFries POS Reporting & Insights</td>
+            </tr>
+          </table>
+        </body>
+      </html>
+    `;
+
+    const blob = new Blob(['\ufeff', htmlReport], { type: 'application/vnd.ms-excel;charset=utf-8' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `surfries-report-${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = `surfries-sales-report-${fileDate}.xls`;
     document.body.appendChild(a);
     a.click();
     window.URL.revokeObjectURL(url);
     document.body.removeChild(a);
-    logActivity('Export', 'Exported report as Excel CSV');
+    logActivity('Export', `Exported formatted Excel report: ${a.download}`);
   };
 
   const backupRecords = () => {
-    alert('✅ Backup Complete!\n\nAll records have been backed up to cloud storage.\n\nLast backup: ' + new Date().toLocaleString());
-    logActivity('Backup', 'Manual backup performed');
+    const now = new Date();
+    const backupDate = now.toLocaleDateString('en-US');
+    const backupDateTime = now.toLocaleString();
+    const fileDate = now.toISOString().slice(0, 10);
+
+    const snapshot = {
+      exported_at: now.toISOString(),
+      exported_by: currentUser?.email || 'unknown',
+      app_version: 'surfries-pos-backup-v2',
+      products,
+      ingredients,
+      promotions,
+      transactions,
+      inventory_logs: inventoryLogs,
+      activity_logs: activityLogs,
+      users,
+    };
+
+    const sizeBytes = new Blob([JSON.stringify(snapshot)]).size;
+    const sizeText =
+      sizeBytes >= 1024 * 1024
+        ? `${(sizeBytes / (1024 * 1024)).toFixed(2)} MB`
+        : `${(sizeBytes / 1024).toFixed(2)} KB`;
+
+    const escapeHtml = (value: unknown) =>
+      String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+
+    const formatExcelPeso = (amount: number) =>
+      `&#8369; ${Number(amount).toLocaleString('en-PH', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+
+    const toBusinessLogDetail = (action: string, details: string) => {
+      const safeAction = String(action || '');
+      const safeDetails = String(details || '');
+      const totalMatch = safeDetails.match(/Total:\s*([0-9]+(?:\.[0-9]+)?)/i);
+
+      if (safeAction.toLowerCase() === 'sale') {
+        if (totalMatch) {
+          return `Sale completed. Order total: ${formatExcelPeso(Number(totalMatch[1]))}.`;
+        }
+        return 'Sale completed.';
+      }
+
+      return safeDetails
+        .replace(
+          /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+          '',
+        )
+        .replace(/\s{2,}/g, ' ')
+        .replace(/:\s*\./g, '.')
+        .trim();
+    };
+
+    const categories = [
+      { name: 'Products', count: products.length },
+      { name: 'Ingredients', count: ingredients.length },
+      { name: 'Promotions', count: promotions.length },
+      { name: 'Transactions', count: transactions.length },
+      { name: 'Inventory Logs', count: inventoryLogs.length },
+      { name: 'Activity Logs', count: activityLogs.length },
+      { name: 'Users', count: users.length },
+    ];
+    const totalRecords = categories.reduce((sum, row) => sum + row.count, 0);
+
+    const overviewRows = categories
+      .map(
+        row => `
+          <tr>
+            <td>${escapeHtml(row.name)}</td>
+            <td class="num">${row.count.toLocaleString()}</td>
+            <td>${backupDate}</td>
+          </tr>
+        `,
+      )
+      .join('');
+
+    const logs = activityLogs
+      .slice(0, 8)
+      .map(
+        log => `
+          <tr>
+            <td>${escapeHtml(new Date(getRecordTimestamp(log)).toLocaleString())}</td>
+            <td>${escapeHtml(log.action)}</td>
+            <td>${escapeHtml(toBusinessLogDetail(log.action, log.details))}</td>
+          </tr>
+        `,
+      )
+      .join('');
+
+    const productSalesMap: Record<string, { sold: number; sales: number }> = {};
+    transactions.forEach(tx => {
+      getTransactionItems(tx).forEach(item => {
+        if (!productSalesMap[item.id]) {
+          productSalesMap[item.id] = { sold: 0, sales: 0 };
+        }
+        productSalesMap[item.id].sold += Number(item.quantity ?? 0);
+        productSalesMap[item.id].sales += Number(item.price ?? 0) * Number(item.quantity ?? 0);
+      });
+    });
+
+    const productPerformanceRows = products
+      .map(product => {
+        const soldData = productSalesMap[product.id] ?? { sold: 0, sales: 0 };
+        const estimatedProfit = soldData.sales - soldData.sold * Number(product.cost ?? 0);
+        return {
+          name: product.name,
+          sold: soldData.sold,
+          remaining: product.stock,
+          sales: soldData.sales,
+          profit: estimatedProfit,
+        };
+      })
+      .sort((a, b) => b.sales - a.sales);
+
+    const totalSoldUnits = productPerformanceRows.reduce((sum, row) => sum + row.sold, 0);
+    const totalRemainingUnits = productPerformanceRows.reduce((sum, row) => sum + row.remaining, 0);
+    const totalProductSales = productPerformanceRows.reduce((sum, row) => sum + row.sales, 0);
+    const totalProductProfit = productPerformanceRows.reduce((sum, row) => sum + row.profit, 0);
+
+    const salesAndStockRows = productPerformanceRows
+      .slice(0, 20)
+      .map(
+        row => `
+          <tr>
+            <td>${escapeHtml(row.name)}</td>
+            <td class="num">${row.sold.toLocaleString()}</td>
+            <td class="num">${row.remaining.toLocaleString()}</td>
+            <td class="num">${formatExcelPeso(row.sales)}</td>
+            <td class="num">${formatExcelPeso(row.profit)}</td>
+            <td>${row.remaining <= 0 ? 'Out of stock' : row.remaining <= 10 ? 'Low stock' : 'In stock'}</td>
+          </tr>
+        `,
+      )
+      .join('');
+
+    const htmlReport = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
+        <head>
+          <meta charset="utf-8" />
+          <style>
+            body { font-family: Calibri, Arial, sans-serif; background:#eef1f4; padding:18px; }
+            table.sheet { border-collapse: collapse; width: 100%; background:#f8fafb; }
+            table.sheet td, table.sheet th { border:1px solid #a7adb4; padding:8px 10px; font-size:14px; }
+            .title { background:#2f6f4e; color:#fff; text-align:center; font-size:34px; font-weight:700; padding:18px; }
+            .meta-label { background:#eff3ef; font-weight:700; text-align:right; }
+            .meta-value { background:#fff; font-weight:600; }
+            .status-ok { color:#217346; font-weight:700; }
+            .section { background:#2f6f4e; color:#fff; font-size:20px; font-weight:700; text-align:left; }
+            .head { background:#c5cbd1; font-weight:700; text-align:center; }
+            .num { text-align:right; font-weight:700; }
+            .total { background:#e4ebe2; font-weight:700; }
+          </style>
+        </head>
+        <body>
+          <table class="sheet">
+            <tr><td class="title" colspan="6">Data Backup Report</td></tr>
+            <tr>
+              <td class="meta-label">Backup Date:</td>
+              <td class="meta-value">${escapeHtml(backupDateTime)}</td>
+              <td class="meta-label">Total File Size:</td>
+              <td class="meta-value">${escapeHtml(sizeText)}</td>
+              <td class="meta-label">Backup Status:</td>
+              <td class="meta-value status-ok">COMPLETED</td>
+            </tr>
+
+            <tr><td class="section" colspan="6">Backup Overview</td></tr>
+            <tr>
+              <th class="head">Category</th>
+              <th class="head">Records Backed Up</th>
+              <th class="head">Last Backup</th>
+              <th class="head">Exported By</th>
+              <th class="head" colspan="2">Mode</th>
+            </tr>
+            ${overviewRows}
+            <tr class="total">
+              <td>Total</td>
+              <td class="num">${totalRecords.toLocaleString()}</td>
+              <td>${backupDate}</td>
+              <td>${escapeHtml(currentUser?.name || 'System')}</td>
+              <td colspan="2">Full Backup</td>
+            </tr>
+
+            <tr><td class="section" colspan="6">Backup Locations</td></tr>
+            <tr>
+              <th class="head">Location</th>
+              <th class="head">Backup Type</th>
+              <th class="head">Status</th>
+              <th class="head">Last Sync</th>
+              <th class="head" colspan="2">Notes</th>
+            </tr>
+            <tr><td>Local Download (.xls)</td><td>Full Backup</td><td class="status-ok">Successful</td><td>${backupDate}</td><td colspan="2">Primary report output</td></tr>
+            <tr><td>POS Data Tables</td><td>Full Backup</td><td class="status-ok">Successful</td><td>${backupDate}</td><td colspan="2">Products, sales, stock, and system records included</td></tr>
+
+            <tr><td class="section" colspan="6">Sales and Inventory Summary</td></tr>
+            <tr>
+              <th class="head">Product</th>
+              <th class="head">Units Sold</th>
+              <th class="head">Units Remaining</th>
+              <th class="head">Sales</th>
+              <th class="head">Estimated Profit</th>
+              <th class="head">Stock Status</th>
+            </tr>
+            ${salesAndStockRows || '<tr><td colspan="6">No product records available.</td></tr>'}
+            <tr class="total">
+              <td>Total</td>
+              <td class="num">${totalSoldUnits.toLocaleString()}</td>
+              <td class="num">${totalRemainingUnits.toLocaleString()}</td>
+              <td class="num">${formatExcelPeso(totalProductSales)}</td>
+              <td class="num">${formatExcelPeso(totalProductProfit)}</td>
+              <td>Overall summary</td>
+            </tr>
+
+            <tr><td class="section" colspan="6">Backup Logs</td></tr>
+            <tr>
+              <th class="head">Timestamp</th>
+              <th class="head">Action</th>
+              <th class="head" colspan="4">Details</th>
+            </tr>
+            ${logs || '<tr><td colspan="6">No recent logs available.</td></tr>'}
+          </table>
+        </body>
+      </html>
+    `;
+
+    const blob = new Blob(['\ufeff', htmlReport], { type: 'application/vnd.ms-excel;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `surfries-backup-report-${fileDate}.xls`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+
+    setLastBackupFileName(a.download);
+    setShowBackupSuccessModal(true);
+    logActivity('Backup', `Generated formatted backup report: ${a.download}`);
   };
 
   const restoreSystem = () => {
@@ -986,7 +1694,7 @@ export default function App() {
       const label = days[d.getDay()];
       const dateStr = d.toDateString();
       const sales = transactions
-        .filter(t => new Date(t.timestamp).toDateString() === dateStr)
+        .filter(tx => new Date(getRecordTimestamp(tx)).toDateString() === dateStr)
         .reduce((s, t) => s + t.total, 0);
       // Simple forecast: sales * 1.05 + small random
       const forecast = Math.round(sales * 1.08 + 20 * i);
@@ -997,12 +1705,12 @@ export default function App() {
   // Hourly data for today
   const hourlyData = useMemo(() => {
     const today = new Date().toDateString();
-    const todayTx = transactions.filter(t => new Date(t.timestamp).toDateString() === today);
+    const todayTx = transactions.filter(tx => new Date(getRecordTimestamp(tx)).toDateString() === today);
     return Array.from({ length: 12 }, (_, i) => {
       const hour = 8 + i; // 8am – 7pm
       const label = hour < 12 ? `${hour}am` : hour === 12 ? '12pm' : `${hour - 12}pm`;
       const sales = todayTx
-        .filter(t => new Date(t.timestamp).getHours() === hour)
+        .filter(tx => new Date(getRecordTimestamp(tx)).getHours() === hour)
         .reduce((s, t) => s + t.total, 0);
       return { name: label, sales: Math.round(sales * 100) / 100 };
     });
@@ -1011,7 +1719,7 @@ export default function App() {
   const topProducts = useMemo(() => {
     const counts: Record<string, { name: string; qty: number; revenue: number }> = {};
     transactions.forEach(tx =>
-      tx.items.forEach(item => {
+      getTransactionItems(tx).forEach(item => {
         if (!counts[item.id]) counts[item.id] = { name: item.name, qty: 0, revenue: 0 };
         counts[item.id].qty += item.quantity;
         counts[item.id].revenue += item.price * item.quantity;
@@ -1023,7 +1731,7 @@ export default function App() {
   const categoryBreakdown = useMemo(() => {
     const map: Record<string, { revenue: number; qty: number }> = {};
     transactions.forEach(tx =>
-      tx.items.forEach(item => {
+      getTransactionItems(tx).forEach(item => {
         if (!map[item.category]) map[item.category] = { revenue: 0, qty: 0 };
         map[item.category].revenue += item.price * item.quantity;
         map[item.category].qty += item.quantity;
@@ -1044,17 +1752,21 @@ export default function App() {
   // Daily / weekly / monthly totals
   const todaySales = useMemo(() => {
     const today = new Date().toDateString();
-    return transactions.filter(t => new Date(t.timestamp).toDateString() === today).reduce((s, t) => s + t.total, 0);
+    return transactions
+      .filter(tx => new Date(getRecordTimestamp(tx)).toDateString() === today)
+      .reduce((s, t) => s + t.total, 0);
   }, [transactions]);
 
   const weeklySales = useMemo(() => {
     const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    return transactions.filter(t => new Date(t.timestamp).getTime() >= weekAgo).reduce((s, t) => s + t.total, 0);
+    return transactions
+      .filter(tx => new Date(getRecordTimestamp(tx)).getTime() >= weekAgo)
+      .reduce((s, t) => s + t.total, 0);
   }, [transactions]);
 
   const todayTxCount = useMemo(() => {
     const today = new Date().toDateString();
-    return transactions.filter(t => new Date(t.timestamp).toDateString() === today).length;
+    return transactions.filter(tx => new Date(getRecordTimestamp(tx)).toDateString() === today).length;
   }, [transactions]);
 
   const avgOrderValue = useMemo(() => {
@@ -1067,21 +1779,21 @@ export default function App() {
     const recs: { title: string; body: string; color: string }[] = [];
 
     lowStockIngredients.forEach(ing => {
-      recs.push({ title: '⚠ Reorder Alert', body: `Reorder ${ing.name} — only ${ing.stock} ${ing.unit} left (threshold: ${ing.lowStockThreshold}).`, color: 'border-rose-200' });
+      recs.push({ title: '⚠ Reorder Alert', body: `Reorder ${ing.name} — only ${ing.stock} ${ing.unit} left (threshold: ${getLowStockThreshold(ing)}).`, color: 'border-rose-200' });
     });
 
-    const slowMovers = products.filter(p => p.salesVelocity === 'slow');
+    const slowMovers = products.filter(p => getProductVelocity(p) === 'slow');
     slowMovers.forEach(p => {
       recs.push({ title: '📉 Promo Suggestion', body: `"${p.name}" is slow-moving. Consider a 15% bundle discount.`, color: 'border-orange-200' });
     });
 
-    const fastMovers = products.filter(p => p.salesVelocity === 'fast' && p.stock <= p.lowStockThreshold * 2);
+    const fastMovers = products.filter(p => getProductVelocity(p) === 'fast' && p.stock <= getLowStockThreshold(p) * 2);
     fastMovers.forEach(p => {
       recs.push({ title: '🔥 Prep Alert', body: `"${p.name}" is fast-selling with only ${p.stock} left. Prepare more!`, color: 'border-blue-200' });
     });
 
     if (transactions.length > 5) {
-      recs.push({ title: '📊 Profit Focus', body: 'Combos have highest margins. Suggest upselling combos during peak hours.', color: 'border-violet-200' });
+      recs.push({ title: '📊 Profit Focus', body: 'Add-ons are moving well. Suggest pairing add-ons during peak hours.', color: 'border-violet-200' });
     }
 
     if (!recs.length) {
@@ -1102,11 +1814,53 @@ export default function App() {
     };
     const cutoff = ranges[reportRange] ? now - ranges[reportRange] : 0;
     return transactions.filter(tx => {
-      const inTime = cutoff === 0 || new Date(tx.timestamp).getTime() >= cutoff;
-      const inCat = reportCategory === 'all' || tx.items.some(i => i.category === reportCategory);
+      const inTime = cutoff === 0 || new Date(getRecordTimestamp(tx)).getTime() >= cutoff;
+      const inCat = reportCategory === 'all' || getTransactionItems(tx).some(item => item.category === reportCategory);
       return inTime && inCat;
     });
   }, [transactions, reportRange, reportCategory]);
+
+  const reportProductPerformance = useMemo(() => {
+    const soldByProductId: Record<string, { sold: number; sales: number }> = {};
+
+    filteredTransactions.forEach(tx => {
+      getTransactionItems(tx).forEach(item => {
+        if (!soldByProductId[item.id]) {
+          soldByProductId[item.id] = { sold: 0, sales: 0 };
+        }
+        soldByProductId[item.id].sold += Number(item.quantity ?? 0);
+        soldByProductId[item.id].sales += Number(item.price ?? 0) * Number(item.quantity ?? 0);
+      });
+    });
+
+    return products
+      .map(product => {
+        const soldData = soldByProductId[product.id] ?? { sold: 0, sales: 0 };
+        const estimatedProfit = soldData.sales - soldData.sold * Number(product.cost ?? 0);
+        return {
+          id: product.id,
+          name: product.name,
+          sold: soldData.sold,
+          remaining: product.stock,
+          sales: Math.round(soldData.sales * 100) / 100,
+          estimatedProfit: Math.round(estimatedProfit * 100) / 100,
+        };
+      })
+      .sort((a, b) => b.sales - a.sales);
+  }, [filteredTransactions, products]);
+
+  const reportUnitsSold = useMemo(
+    () => reportProductPerformance.reduce((sum, item) => sum + item.sold, 0),
+    [reportProductPerformance],
+  );
+  const reportUnitsRemaining = useMemo(
+    () => reportProductPerformance.reduce((sum, item) => sum + item.remaining, 0),
+    [reportProductPerformance],
+  );
+  const reportEstimatedProfit = useMemo(
+    () => reportProductPerformance.reduce((sum, item) => sum + item.estimatedProfit, 0),
+    [reportProductPerformance],
+  );
 
   const reportRevenue = filteredTransactions.reduce((s, t) => s + t.total, 0);
   const reportDiscount = filteredTransactions.reduce((s, t) => s + t.discount, 0);
@@ -1114,22 +1868,101 @@ export default function App() {
 
   // ─── RENDER: Dashboard ───────────────────────────────────────────────────
 
+  const fetchInsights = useCallback(async () => {
+    setInsightsLoading(true);
+    setInsightsError(null);
+
+    try {
+      const filteredCategoryMap: Record<string, { revenue: number; qty: number }> = {};
+
+      filteredTransactions.forEach(tx => {
+        getTransactionItems(tx).forEach(item => {
+          if (!filteredCategoryMap[item.category]) {
+            filteredCategoryMap[item.category] = { revenue: 0, qty: 0 };
+          }
+          filteredCategoryMap[item.category].revenue += item.price * item.quantity;
+          filteredCategoryMap[item.category].qty += item.quantity;
+        });
+      });
+
+      const filteredTopProducts = reportProductPerformance
+        .filter(product => product.sold > 0)
+        .map(product => ({
+          name: product.name,
+          qty: product.sold,
+          revenue: product.sales,
+        }))
+        .slice(0, 5);
+      const filteredCategoryBreakdown = Object.entries(filteredCategoryMap).map(([name, values]) => ({
+        name,
+        revenue: Math.round(values.revenue * 100) / 100,
+        qty: values.qty,
+      }));
+
+      const reportData = {
+        transactionCount: filteredTransactions.length,
+        totalRevenue: reportRevenue,
+        totalDiscount: reportDiscount,
+        avgOrderValue,
+        topProducts: filteredTopProducts,
+        categoryBreakdown: filteredCategoryBreakdown,
+        transactions: filteredTransactions,
+        reportRange,
+        reportCategory,
+        lowStockCount,
+        productPerformance: reportProductPerformance.slice(0, 12),
+        totalEstimatedProfit: reportEstimatedProfit,
+        totalUnitsSold: reportUnitsSold,
+        totalUnitsRemaining: reportUnitsRemaining,
+      };
+
+      const insightsText = await generateInsights(reportData);
+      setInsights(insightsText);
+    } catch (error) {
+      console.error('Error fetching insights:', error);
+      setInsightsError(
+        error instanceof Error
+          ? error.message
+          : 'Failed to generate AI insights from current POS data.',
+      );
+    } finally {
+      setInsightsLoading(false);
+    }
+  }, [
+    filteredTransactions,
+    reportRevenue,
+    reportDiscount,
+    avgOrderValue,
+    reportRange,
+    reportCategory,
+    lowStockCount,
+    reportProductPerformance,
+    reportEstimatedProfit,
+    reportUnitsSold,
+    reportUnitsRemaining,
+  ]);
+
+  useEffect(() => {
+    setInsights(null);
+    setInsightsError(null);
+  }, [reportRange, reportCategory]);
+
   const renderDashboard = () => (
     <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
         <div>
-          <h1 className="text-2xl font-bold">Dashboard Overview</h1>
-          <p className="text-slate-500">Real-time business performance monitoring</p>
+          <h1 className="text-xl sm:text-2xl font-bold">Dashboard Overview</h1>
+          <p className="text-slate-500 text-sm sm:text-base">Real-time business performance monitoring</p>
         </div>
-        <div className="flex gap-2">
-          <div className="bg-white px-4 py-2 rounded-xl border border-slate-200 flex items-center gap-2">
+        <div className="flex gap-2 self-start sm:self-auto">
+          <div className="bg-white px-3 py-2 rounded-xl border border-slate-200 flex items-center gap-2">
             <Clock size={16} className="text-orange-500" />
-            <span className="text-sm font-bold">Peak Hours: {peakHour}</span>
+            <span className="text-xs sm:text-sm font-bold">Peak Hours: {peakHour}</span>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-6">
         <StatCard title="Today's Sales" value={formatCurrency(todaySales)} icon={DollarSign} trend={5.2} color="bg-orange-500" />
         <StatCard title="Weekly Sales" value={formatCurrency(weeklySales)} icon={TrendingUp} trend={12.8} color="bg-blue-500" />
         <StatCard title="Total Revenue" value={formatCurrency(totalRevenue)} icon={BarChart3} trend={18.4} color="bg-violet-500" />
@@ -1187,18 +2020,18 @@ export default function App() {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-3">
               <p className="text-xs font-bold text-emerald-600 uppercase tracking-wider">Top Selling</p>
-              {products.filter(p => p.salesVelocity === 'fast').slice(0, 3).map(p => (
+              {products.filter(p => getProductVelocity(p) === 'fast').slice(0, 3).map(p => (
                 <div key={p.id} className="flex items-center gap-3 p-2 bg-emerald-50 rounded-xl border border-emerald-100">
-                  <img src={p.image} className="w-8 h-8 rounded-lg object-cover" alt="" />
+                  <img src={getEntityImage(p)} className="w-8 h-8 rounded-lg object-cover" alt="" />
                   <span className="text-xs font-bold truncate">{p.name}</span>
                 </div>
               ))}
             </div>
             <div className="space-y-3">
               <p className="text-xs font-bold text-rose-600 uppercase tracking-wider">Slow Moving</p>
-              {products.filter(p => p.salesVelocity === 'slow').map(p => (
+              {products.filter(p => getProductVelocity(p) === 'slow').map(p => (
                 <div key={p.id} className="flex items-center gap-3 p-2 bg-rose-50 rounded-xl border border-rose-100">
-                  <img src={p.image} className="w-8 h-8 rounded-lg object-cover" alt="" />
+                  <img src={getEntityImage(p)} className="w-8 h-8 rounded-lg object-cover" alt="" />
                   <span className="text-xs font-bold truncate">{p.name}</span>
                 </div>
               ))}
@@ -1243,25 +2076,25 @@ export default function App() {
     });
 
     return (
-      <div className="flex h-full gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="flex h-full flex-col xl:flex-row gap-3 md:gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
         {/* Product grid */}
         <div className="flex-1 flex flex-col min-w-0">
-          <div className="flex flex-col gap-4 mb-6">
+          <div className="flex flex-col gap-3 mb-4 md:mb-6">
             <div className="relative">
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
               <input
                 type="text"
                 placeholder="Search products..."
-                className="w-full pl-12 pr-4 py-3 bg-white border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all"
+                className="w-full rounded-2xl border border-slate-200 bg-white py-2.5 md:py-3 pr-4 pl-12 text-sm shadow-sm shadow-slate-200/40 transition-all focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20"
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
               />
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 onClick={() => setActiveCategory('all')}
                 className={cn(
-                  'px-6 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-all cursor-pointer',
+                  'cursor-pointer whitespace-nowrap rounded-xl px-4 md:px-6 py-2 text-xs md:text-sm font-medium transition-all',
                   activeCategory === 'all'
                     ? 'bg-orange-600 text-white shadow-md shadow-orange-200'
                     : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50',
@@ -1274,7 +2107,7 @@ export default function App() {
                   key={cat.id}
                   onClick={() => setActiveCategory(cat.id)}
                   className={cn(
-                    'px-6 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-all flex items-center gap-2 cursor-pointer',
+                    'flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-xl px-4 md:px-6 py-2 text-xs md:text-sm font-medium transition-all',
                     activeCategory === cat.id
                       ? 'bg-orange-600 text-white shadow-md shadow-orange-200'
                       : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50',
@@ -1287,48 +2120,72 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto pr-2 grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {filtered.map(product => (
-              <motion.div
-                layout
-                key={product.id}
-                onClick={() => addToCart(product)}
-                className={cn(
-                  'group bg-white p-3 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md hover:border-orange-100 transition-all cursor-pointer relative overflow-hidden',
-                  (!product.available || product.stock <= 0) && 'opacity-60 grayscale cursor-not-allowed',
-                )}
-              >
-                {product.stock <= product.lowStockThreshold && product.stock > 0 && (
-                  <div className="absolute top-2 right-2 z-10">
-                    <span className="text-[9px] bg-rose-500 text-white rounded-md px-1.5 py-0.5 font-bold">LOW</span>
+          <div className="grid flex-1 auto-rows-max content-start gap-3 md:gap-5 overflow-y-auto pr-1 md:pr-2 grid-cols-2 sm:[grid-template-columns:repeat(auto-fill,minmax(180px,1fr))] lg:[grid-template-columns:repeat(auto-fill,minmax(220px,1fr))]">
+            {filtered.map(product => {
+              const threshold = getLowStockThreshold(product);
+              const isLowStock = product.stock > 0 && product.stock <= threshold;
+
+              return (
+                <motion.div
+                  layout
+                  key={product.id}
+                  onClick={() => addToCart(product)}
+                  className={cn(
+                    'group relative flex h-full cursor-pointer flex-col overflow-hidden rounded-2xl md:rounded-[28px] border border-slate-200/80 bg-white p-3 md:p-4 shadow-[0_12px_30px_-24px_rgba(15,23,42,0.45)] transition-all duration-300 hover:-translate-y-1 hover:border-orange-200 hover:shadow-[0_22px_50px_-28px_rgba(249,115,22,0.38)]',
+                    (!product.available || product.stock <= 0) && 'cursor-not-allowed grayscale opacity-60',
+                  )}
+                >
+                  {isLowStock && (
+                    <div className="absolute top-3 right-3 z-10">
+                      <span className="rounded-full bg-rose-500 px-2.5 py-1 text-[10px] font-black tracking-[0.18em] text-white">LOW</span>
+                    </div>
+                  )}
+                  <div className="mb-3 md:mb-4 aspect-[5/4] md:aspect-[4/3] overflow-hidden rounded-2xl md:rounded-[22px] bg-slate-100">
+                    <img
+                      src={getEntityImage(product)}
+                      alt={product.name}
+                      className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                    />
                   </div>
-                )}
-                <div className="aspect-square rounded-xl overflow-hidden mb-3">
-                  <img src={product.image} alt={product.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                  <div className="flex flex-1 flex-col">
+                    <h4 className="min-h-[2.3rem] md:min-h-[2.75rem] text-[13px] md:text-sm font-bold leading-5 text-slate-900 line-clamp-2">{product.name}</h4>
+                    <p className="mt-1 text-[10px] md:text-[11px] font-semibold uppercase tracking-[0.16em] md:tracking-[0.18em] text-slate-400">
+                      {product.category} · {product.size}
+                    </p>
+                    <div className="mt-auto flex items-end justify-between gap-2 md:gap-3 pt-2.5 md:pt-4">
+                      <span className="text-base md:text-lg font-black tracking-tight text-orange-600">{formatCurrency(product.price)}</span>
+                      <span
+                        className={cn(
+                          'rounded-full px-2 py-1 text-[10px] font-bold',
+                          isLowStock ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-500',
+                        )}
+                      >
+                        {product.stock} left
+                      </span>
+                    </div>
+                  </div>
+                </motion.div>
+              );
+            })}
+            {filtered.length === 0 && (
+              <div className="col-span-2 sm:col-span-full flex min-h-[190px] md:min-h-[240px] items-center justify-center rounded-2xl md:rounded-[28px] border border-dashed border-slate-200 bg-white/80 p-6 md:p-8 text-center">
+                <div>
+                  <p className="text-sm font-bold text-slate-900">No products found</p>
+                  <p className="mt-1 text-sm text-slate-500">Try another search term or switch categories.</p>
                 </div>
-                <h4 className="font-bold text-slate-900 text-sm line-clamp-1">{product.name}</h4>
-                <div className="flex justify-between items-center mt-1">
-                  <span className="text-orange-600 font-bold">{formatCurrency(product.price)}</span>
-                  <span className={cn(
-                    'text-[10px] px-1.5 py-0.5 rounded-md font-medium',
-                    product.stock <= product.lowStockThreshold ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500',
-                  )}>
-                    {product.stock} left
-                  </span>
-                </div>
-              </motion.div>
-            ))}
+              </div>
+            )}
           </div>
         </div>
 
         {/* Cart */}
-        <div className="w-[380px] flex flex-col bg-white rounded-3xl border border-slate-100 shadow-xl overflow-hidden">
-          <div className="p-6 border-b border-slate-50">
-            <h3 className="text-xl font-bold text-slate-900">Current Order</h3>
-            <p className="text-sm text-slate-500">{formatDate(new Date().toISOString())}</p>
+        <div className="w-full xl:w-[380px] max-h-[74vh] xl:max-h-none flex flex-col bg-white rounded-3xl border border-slate-100 shadow-xl overflow-hidden">
+          <div className="p-4 md:p-6 border-b border-slate-50">
+            <h3 className="text-lg md:text-xl font-bold text-slate-900">Current Order</h3>
+            <p className="text-xs md:text-sm text-slate-500">{formatDate(new Date().toISOString())}</p>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+          <div className="flex-1 overflow-y-auto px-4 md:px-6 py-3 md:py-4 space-y-3 md:space-y-4">
             <AnimatePresence mode="popLayout">
               {cart.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
@@ -1345,9 +2202,9 @@ export default function App() {
                     exit={{ opacity: 0, x: -20 }}
                     className="flex items-center gap-3"
                   >
-                    <img src={item.image} alt={item.name} className="w-12 h-12 rounded-xl object-cover" />
+                    <img src={item.image_url} alt={item.name} className="w-10 h-10 md:w-12 md:h-12 rounded-xl object-cover" />
                     <div className="flex-1 min-w-0">
-                      <h4 className="text-sm font-bold text-slate-900 truncate">{item.name}</h4>
+                      <h4 className="text-xs md:text-sm font-bold text-slate-900 truncate">{item.name}</h4>
                       {item.category === 'fries' && <p className="text-xs text-slate-500 capitalize">{item.flavor}</p>}
                       <p className="text-xs text-orange-600 font-medium">{formatCurrency(item.price)}</p>
                     </div>
@@ -1389,16 +2246,16 @@ export default function App() {
 
               <div className="flex justify-between text-sm text-slate-500 pt-2"><span>Subtotal</span><span>{formatCurrency(cartSubtotal)}</span></div>
               {cartDiscount > 0 && <div className="flex justify-between text-sm text-rose-500"><span>Discount</span><span>-{formatCurrency(cartDiscount)}</span></div>}
-              <div className="flex justify-between text-sm text-slate-500"><span>Tax (10%)</span><span>{formatCurrency(cartTotal * 0.1)}</span></div>
+              <div className="flex justify-between text-sm text-slate-500"><span>Tax (10%)</span><span>{formatCurrency(cartTax)}</span></div>
               <div className="flex justify-between text-lg font-bold text-slate-900 pt-2 border-t border-slate-200">
                 <span>Total</span>
-                <span className="text-orange-600">{formatCurrency(cartTotal * 1.1)}</span>
+                <span className="text-orange-600">{formatCurrency(cartTotal)}</span>
               </div>
             </div>
 
             {/* Payment method selector */}
-            <div className="grid grid-cols-3 gap-2">
-              {(['cash', 'card', 'e-wallet'] as PaymentMethod[]).map(method => (
+            <div className="grid grid-cols-2 gap-2">
+              {(['cash', 'gcash'] as PaymentMethod[]).map(method => (
                 <button
                   key={method}
                   onClick={() => setSelectedPayment(method)}
@@ -1409,7 +2266,7 @@ export default function App() {
                       : 'border-slate-200 bg-white text-slate-500 hover:border-orange-300',
                   )}
                 >
-                  <span className="text-[10px] font-bold uppercase tracking-wider">{method}</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider">{method === 'gcash' ? 'GCash' : method}</span>
                 </button>
               ))}
             </div>
@@ -1417,9 +2274,9 @@ export default function App() {
             <button
               onClick={() => processOrder(selectedPayment)}
               disabled={cart.length === 0 || isProcessingOrder}
-              className="w-full py-4 bg-orange-600 text-white rounded-2xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-700 transition-all active:scale-95 disabled:opacity-50 disabled:shadow-none cursor-pointer"
+              className="w-full py-3.5 md:py-4 bg-orange-600 text-white rounded-2xl font-bold shadow-lg shadow-orange-200 hover:bg-orange-700 transition-all active:scale-95 disabled:opacity-50 disabled:shadow-none cursor-pointer"
             >
-              {isProcessingOrder ? 'Processing Order...' : `Place Order · ${formatCurrency(cartTotal * 1.1)}`}
+              {isProcessingOrder ? 'Processing Order...' : `Place Order - ${formatCurrency(cartTotal)}`}
             </button>
           </div>
         </div>
@@ -1430,20 +2287,82 @@ export default function App() {
   // ─── RENDER: Products ─────────────────────────────────────────────────────
 
   const renderProducts = () => (
-    <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
-      <div className="flex justify-between items-center">
+    <div className="space-y-4 md:space-y-6 animate-in fade-in duration-500 text-slate-900">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold">Product Management</h1>
-          <p className="text-slate-500">Manage your menu, combos, and pricing</p>
+          <h1 className="text-[30px] leading-9 md:text-2xl font-bold">Product Management</h1>
+          <p className="text-slate-500 text-sm md:text-base">Manage your menu, add-ons, and pricing</p>
         </div>
         {isManager && (
-          <button onClick={openAddProduct} className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
-            <Plus size={18} /> Add New Product
+          <button onClick={openAddProduct} className="inline-flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-orange-600 text-white rounded-xl text-xs md:text-sm font-semibold hover:bg-orange-700 transition-colors cursor-pointer shrink-0">
+            <Plus size={16} /> Add New Product
           </button>
         )}
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+      <div className="md:hidden space-y-2.5">
+        {products.map(product => (
+          <div key={product.id} className="bg-white border border-slate-100 rounded-xl p-3 shadow-sm">
+            <div className="flex items-start gap-3">
+              <img src={getEntityImage(product)} alt="" className="w-11 h-11 rounded-lg object-cover shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="font-bold text-sm leading-5 break-words">{product.name}</p>
+                <p className="text-[11px] text-slate-400 capitalize">{product.size} · {product.flavor}</p>
+                <p className="text-[11px] text-slate-500 capitalize mt-0.5">{product.category}</p>
+              </div>
+              <span className={cn('px-2 py-1 rounded-full text-[10px] font-bold uppercase', product.available ? 'bg-orange-50 text-orange-600' : 'bg-slate-100 text-slate-500')}>
+                {product.available ? 'Active' : 'Hidden'}
+              </span>
+            </div>
+
+            <div className="mt-2.5 grid grid-cols-3 gap-2 text-[11px]">
+              <div className="bg-slate-50 rounded-lg px-2 py-1.5">
+                <p className="text-slate-500">Price</p>
+                <p className="font-semibold text-slate-900">{formatCurrency(product.price)}</p>
+              </div>
+              <div className="bg-slate-50 rounded-lg px-2 py-1.5">
+                <p className="text-slate-500">Cost</p>
+                <p className="font-semibold text-slate-900">{formatCurrency(product.cost)}</p>
+              </div>
+              <div className="bg-slate-50 rounded-lg px-2 py-1.5">
+                <p className="text-slate-500">Stock</p>
+                <p className={cn('font-semibold', product.stock <= getLowStockThreshold(product) ? 'text-rose-600' : 'text-slate-900')}>
+                  {product.stock}
+                </p>
+              </div>
+            </div>
+
+            {product.stock <= getLowStockThreshold(product) && (
+              <div className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600">
+                <AlertCircle size={12} />
+                Low stock
+              </div>
+            )}
+
+            {isManager && (
+              <div className="mt-2.5 flex justify-end gap-1">
+                <button
+                  onClick={() => toggleAvailability(product.id)}
+                  className="text-slate-500 hover:text-blue-600 transition-colors p-2 rounded-lg hover:bg-slate-50 cursor-pointer"
+                  title={product.available ? 'Hide' : 'Show'}
+                >
+                  {product.available ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+                <button onClick={() => openEditProduct(product)} className="text-slate-500 hover:text-orange-600 transition-colors p-2 rounded-lg hover:bg-slate-50 cursor-pointer">
+                  <Edit2 size={15} />
+                </button>
+                {isAdmin && (
+                  <button onClick={() => deleteProduct(product.id)} className="text-slate-500 hover:text-rose-600 transition-colors p-2 rounded-lg hover:bg-slate-50 cursor-pointer">
+                    <Trash2 size={15} />
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="hidden md:block bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
         <table className="w-full text-left">
           <thead>
             <tr className="bg-slate-50 text-slate-500 text-xs font-bold uppercase tracking-wider">
@@ -1461,7 +2380,7 @@ export default function App() {
               <tr key={product.id} className="hover:bg-slate-50/50 transition-colors">
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
-                    <img src={product.image} alt="" className="w-10 h-10 rounded-lg object-cover" />
+                    <img src={getEntityImage(product)} alt="" className="w-10 h-10 rounded-lg object-cover" />
                     <div>
                       <span className="font-bold">{product.name}</span>
                       <p className="text-xs text-slate-400 capitalize">{product.size} · {product.flavor}</p>
@@ -1473,8 +2392,8 @@ export default function App() {
                 <td className="px-6 py-4"><span className="text-sm text-slate-400">{formatCurrency(product.cost)}</span></td>
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-2">
-                    <span className={cn('text-sm font-medium', product.stock <= product.lowStockThreshold ? 'text-rose-600' : '')}>{product.stock}</span>
-                    {product.stock <= product.lowStockThreshold && <AlertCircle size={14} className="text-rose-500" />}
+                    <span className={cn('text-sm font-medium', product.stock <= getLowStockThreshold(product) ? 'text-rose-600' : '')}>{product.stock}</span>
+                    {product.stock <= getLowStockThreshold(product) && <AlertCircle size={14} className="text-rose-500" />}
                   </div>
                 </td>
                 <td className="px-6 py-4">
@@ -1506,31 +2425,59 @@ export default function App() {
   // ─── RENDER: Inventory ────────────────────────────────────────────────────
 
   const renderInventory = () => (
-    <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
-      <div className="flex justify-between items-center">
+    <div className="space-y-4 md:space-y-6 animate-in fade-in duration-500 text-slate-900">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Inventory Management</h1>
-          <p className="text-slate-500">Ingredients, packaging, and usage tracking</p>
+          <h1 className="text-[30px] leading-9 md:text-2xl font-bold">Inventory Management</h1>
+          <p className="text-slate-500 text-sm md:text-base">Ingredients, packaging, and usage tracking</p>
         </div>
         {isManager && (
-          <div className="flex gap-2">
-            <button onClick={() => openStockModal('in')} className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
-              <Plus size={18} className="text-emerald-600" /> Stock-In
+          <div className="flex gap-2 w-full sm:w-auto">
+            <button onClick={() => openStockModal('in')} className="flex-1 sm:flex-none justify-center flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-white border border-slate-200 rounded-xl text-xs md:text-sm font-semibold hover:bg-slate-50 transition-colors cursor-pointer">
+              <Plus size={15} className="text-emerald-600" /> Stock-In
             </button>
-            <button onClick={() => openStockModal('waste')} className="flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 rounded-xl text-sm font-medium hover:bg-rose-100 transition-colors cursor-pointer">
-              <Trash2 size={18} /> Report Waste
+            <button onClick={() => openStockModal('waste')} className="flex-1 sm:flex-none justify-center flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-rose-50 text-rose-600 rounded-xl text-xs md:text-sm font-semibold hover:bg-rose-100 transition-colors cursor-pointer">
+              <Trash2 size={15} /> Report Waste
             </button>
           </div>
         )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 space-y-6">
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-            <div className="p-6 border-b border-slate-50">
-              <h3 className="text-lg font-bold">Current Stock</h3>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+        <div className="lg:col-span-2 space-y-4 md:space-y-6">
+          <div className="bg-white rounded-xl md:rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <div className="p-4 md:p-6 border-b border-slate-50">
+              <h3 className="text-base md:text-lg font-bold">Current Stock</h3>
             </div>
-            <table className="w-full text-left">
+            <div className="md:hidden p-3 space-y-2.5">
+              {ingredients.map(item => (
+                <div key={item.id} className="rounded-lg border border-slate-100 p-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-900 break-words">{item.name}</p>
+                      <p className="text-[11px] text-slate-500 capitalize">{item.category}</p>
+                    </div>
+                    <p className="text-xs font-bold text-slate-900 whitespace-nowrap">{item.stock} {item.unit}</p>
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-2">
+                    <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div
+                        className={cn('h-full rounded-full', item.stock <= getLowStockThreshold(item) ? 'bg-rose-500' : 'bg-orange-500')}
+                        style={{ width: `${Math.min(100, (item.stock / (Math.max(getLowStockThreshold(item), 1) * 5)) * 100)}%` }}
+                      />
+                    </div>
+                    {item.stock <= getLowStockThreshold(item) ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase text-rose-600"><AlertCircle size={10} />Low</span>
+                    ) : (
+                      <span className="text-[10px] font-bold uppercase text-emerald-600">OK</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <table className="hidden md:table w-full text-left">
               <thead>
                 <tr className="bg-slate-50 text-slate-500 text-[10px] font-bold uppercase tracking-wider">
                   <th className="px-6 py-3">Item Name</th>
@@ -1549,14 +2496,14 @@ export default function App() {
                         <span className="text-sm font-bold">{item.stock} {item.unit}</span>
                         <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden">
                           <div
-                            className={cn('h-full rounded-full', item.stock <= item.lowStockThreshold ? 'bg-rose-500' : 'bg-orange-500')}
-                            style={{ width: `${Math.min(100, (item.stock / (item.lowStockThreshold * 5)) * 100)}%` }}
+                            className={cn('h-full rounded-full', item.stock <= getLowStockThreshold(item) ? 'bg-rose-500' : 'bg-orange-500')}
+                            style={{ width: `${Math.min(100, (item.stock / (Math.max(getLowStockThreshold(item), 1) * 5)) * 100)}%` }}
                           />
                         </div>
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      {item.stock <= item.lowStockThreshold ? (
+                      {item.stock <= getLowStockThreshold(item) ? (
                         <span className="flex items-center gap-1 text-rose-600 text-[10px] font-bold uppercase"><AlertCircle size={12} /> Low Stock</span>
                       ) : (
                         <span className="text-emerald-600 text-[10px] font-bold uppercase">In Stock</span>
@@ -1570,18 +2517,18 @@ export default function App() {
 
           {/* Low-stock product alerts */}
           {lowStockProducts.length > 0 && (
-            <div className="bg-white rounded-2xl border border-rose-100 shadow-sm overflow-hidden">
-              <div className="p-6 border-b border-rose-50 flex items-center gap-3">
+            <div className="bg-white rounded-xl md:rounded-2xl border border-rose-100 shadow-sm overflow-hidden">
+              <div className="p-4 md:p-6 border-b border-rose-50 flex items-center gap-3">
                 <AlertCircle size={18} className="text-rose-500" />
-                <h3 className="text-lg font-bold text-rose-700">Low Stock Products</h3>
+                <h3 className="text-base md:text-lg font-bold text-rose-700">Low Stock Products</h3>
               </div>
-              <div className="p-6 grid grid-cols-2 gap-3">
+              <div className="p-3 md:p-6 grid grid-cols-1 sm:grid-cols-2 gap-2.5 md:gap-3">
                 {lowStockProducts.map(p => (
                   <div key={p.id} className="flex items-center gap-3 p-3 bg-rose-50 rounded-xl border border-rose-100">
-                    <img src={p.image} className="w-9 h-9 rounded-lg object-cover" alt="" />
+                    <img src={getEntityImage(p)} className="w-9 h-9 rounded-lg object-cover" alt="" />
                     <div>
                       <p className="text-xs font-bold text-slate-900 truncate">{p.name}</p>
-                      <p className="text-[10px] text-rose-600">{p.stock} left (min {p.lowStockThreshold})</p>
+                      <p className="text-[10px] text-rose-600">{p.stock} left (min {getLowStockThreshold(p)})</p>
                     </div>
                   </div>
                 ))}
@@ -1590,13 +2537,13 @@ export default function App() {
           )}
         </div>
 
-        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-          <h3 className="text-lg font-bold mb-4">Inventory History</h3>
-          <div className="space-y-4 max-h-[600px] overflow-y-auto pr-1">
-            {inventoryLogs.length === 0 && (
+        <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+          <h3 className="text-base md:text-lg font-bold mb-3 md:mb-4">Inventory History</h3>
+          <div className="space-y-3 md:space-y-4 max-h-[360px] md:max-h-[600px] overflow-y-auto pr-1">
+            {inventoryHistoryLogs.length === 0 && (
               <p className="text-sm text-slate-400 text-center py-8">No inventory activity yet.</p>
             )}
-            {inventoryLogs.slice(0, 20).map(log => (
+            {inventoryHistoryLogs.slice(0, 20).map(log => (
               <div key={log.id} className="flex gap-3 pb-4 border-b border-slate-50 last:border-0">
                 <div className={cn(
                   'w-8 h-8 rounded-lg flex items-center justify-center shrink-0',
@@ -1606,14 +2553,14 @@ export default function App() {
                   {log.type === 'sale' ? <TrendingUp size={16} /> : log.type === 'waste' ? <Trash2 size={16} /> : <Plus size={16} />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-bold truncate">{log.itemName}</p>
+                  <p className="text-sm font-bold truncate">{getInventoryItemName(log)}</p>
                   <p className="text-[10px] text-slate-500">{log.reason}</p>
                 </div>
                 <div className="text-right">
                   <p className={cn('text-sm font-bold', (log.type === 'sale' || log.type === 'waste') ? 'text-rose-600' : 'text-emerald-600')}>
                     {(log.type === 'sale' || log.type === 'waste') ? '-' : '+'}{log.quantity}
                   </p>
-                  <p className="text-[10px] text-slate-400">{new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                  <p className="text-[10px] text-slate-400">{new Date(getRecordTimestamp(log)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
                 </div>
               </div>
             ))}
@@ -1626,27 +2573,27 @@ export default function App() {
   // ─── RENDER: Reports ──────────────────────────────────────────────────────
 
   const renderReports = () => (
-    <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
-      <div className="flex justify-between items-center">
+    <div className="space-y-4 md:space-y-6 animate-in fade-in duration-500 text-slate-900">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Reporting & Insights</h1>
-          <p className="text-slate-500">Detailed business performance and forecasts</p>
+          <h1 className="text-[30px] leading-9 md:text-2xl font-bold">Reporting & Insights</h1>
+          <p className="text-slate-500 text-sm md:text-base">Detailed business performance and forecasts</p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={exportPDF} className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
-            <Download size={18} /> Export PDF
+        <div className="flex gap-2 w-full sm:w-auto">
+          <button onClick={exportPDF} className="flex-1 sm:flex-none justify-center flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-white border border-slate-200 rounded-xl text-xs md:text-sm font-semibold hover:bg-slate-50 transition-colors cursor-pointer">
+            <Download size={15} /> Export PDF
           </button>
-          <button onClick={exportExcel} className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer">
-            <Database size={18} /> Export Excel
+          <button onClick={exportExcel} className="flex-1 sm:flex-none justify-center flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-white border border-slate-200 rounded-xl text-xs md:text-sm font-semibold hover:bg-slate-50 transition-colors cursor-pointer">
+            <Database size={15} /> Export Excel
           </button>
         </div>
       </div>
 
       {/* Report Tabs */}
-      <div className="flex gap-4 border-b border-slate-100">
+      <div className="flex gap-2 sm:gap-4 border-b border-slate-100 overflow-x-auto no-scrollbar">
         <button
           onClick={() => setReportTab('overview')}
-          className={`px-4 py-3 font-medium text-sm relative transition-colors whitespace-nowrap cursor-pointer ${
+          className={`px-3 sm:px-4 py-2.5 sm:py-3 font-medium text-sm relative transition-colors whitespace-nowrap cursor-pointer ${
             reportTab === 'overview'
               ? 'text-orange-600 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-1 after:bg-orange-600'
               : 'text-slate-500 hover:text-slate-700'
@@ -1656,7 +2603,7 @@ export default function App() {
         </button>
         <button
           onClick={() => setReportTab('transactions')}
-          className={`px-4 py-3 font-medium text-sm relative transition-colors whitespace-nowrap cursor-pointer ${
+          className={`px-3 sm:px-4 py-2.5 sm:py-3 font-medium text-sm relative transition-colors whitespace-nowrap cursor-pointer ${
             reportTab === 'transactions'
               ? 'text-orange-600 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-1 after:bg-orange-600'
               : 'text-slate-500 hover:text-slate-700'
@@ -1666,7 +2613,7 @@ export default function App() {
         </button>
         <button
           onClick={() => setReportTab('insights')}
-          className={`px-4 py-3 font-medium text-sm relative transition-colors whitespace-nowrap cursor-pointer ${
+          className={`px-3 sm:px-4 py-2.5 sm:py-3 font-medium text-sm relative transition-colors whitespace-nowrap cursor-pointer ${
             reportTab === 'insights'
               ? 'text-orange-600 after:absolute after:bottom-0 after:left-0 after:right-0 after:h-1 after:bg-orange-600'
               : 'text-slate-500 hover:text-slate-700'
@@ -1679,11 +2626,11 @@ export default function App() {
       {/* Overview Tab */}
       {reportTab === 'overview' && (
         <>
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <div className="flex flex-wrap gap-4 items-end mb-6">
+          <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4 items-end mb-4 md:mb-6">
               <div className="space-y-1">
                 <label className="text-xs font-bold text-slate-400 uppercase">Date Range</label>
-                <select value={reportRange} onChange={e => setReportRange(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+                <select value={reportRange} onChange={e => setReportRange(e.target.value)} className="w-full sm:w-48 bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
                   <option value="daily">Daily</option>
                   <option value="weekly">Weekly</option>
                   <option value="monthly">Monthly</option>
@@ -1691,20 +2638,19 @@ export default function App() {
               </div>
               <div className="space-y-1">
                 <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
-                <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+                <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-full sm:w-48 bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
                   <option value="all">All Categories</option>
                   <option value="fries">Fries</option>
                   <option value="drinks">Drinks</option>
                   <option value="add-ons">Add-ons</option>
-                  <option value="combos">Combos</option>
                 </select>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
               <div className="lg:col-span-2">
-                <h3 className="text-lg font-bold mb-6">Revenue Breakdown</h3>
-                <div className="h-[300px]">
+                <h3 className="text-base md:text-lg font-bold mb-4 md:mb-6">Revenue Breakdown</h3>
+                <div className="h-[240px] md:h-[300px]">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={weekChartData}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
@@ -1717,7 +2663,7 @@ export default function App() {
                 </div>
               </div>
               <div className="space-y-4">
-                <h3 className="text-lg font-bold mb-4">Summary</h3>
+                <h3 className="text-base md:text-lg font-bold mb-3 md:mb-4">Summary</h3>
                 <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
                   <div className="flex justify-between items-center">
                     <span className="text-sm text-slate-500">Transactions</span>
@@ -1745,8 +2691,8 @@ export default function App() {
           </div>
 
           {/* Top Products Report */}
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold mb-6">Top Selling Products</h3>
+          <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-base md:text-lg font-bold mb-4 md:mb-6">Top Selling Products</h3>
             {topProducts.length === 0 ? (
               <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
             ) : (
@@ -1774,12 +2720,12 @@ export default function App() {
           </div>
 
           {/* Category Breakdown */}
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold mb-6">Sales by Category</h3>
+          <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-base md:text-lg font-bold mb-4 md:mb-6">Sales by Category</h3>
             {categoryBreakdown.length === 0 ? (
               <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
             ) : (
-              <div className="h-[250px]">
+              <div className="h-[220px] md:h-[250px]">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={categoryBreakdown}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
@@ -1797,11 +2743,11 @@ export default function App() {
 
       {/* Transactions Tab */}
       {reportTab === 'transactions' && (
-        <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-          <div className="flex flex-wrap gap-4 items-end mb-6">
+        <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4 items-end mb-4 md:mb-6">
             <div className="space-y-1">
               <label className="text-xs font-bold text-slate-400 uppercase">Filter by Date</label>
-              <select value={reportRange} onChange={e => setReportRange(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+              <select value={reportRange} onChange={e => setReportRange(e.target.value)} className="w-full sm:w-48 bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
                 <option value="daily">Daily</option>
                 <option value="weekly">Weekly</option>
                 <option value="monthly">Monthly</option>
@@ -1809,29 +2755,59 @@ export default function App() {
             </div>
             <div className="space-y-1">
               <label className="text-xs font-bold text-slate-400 uppercase">Filter by Category</label>
-              <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-48 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+              <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-full sm:w-48 bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
                 <option value="all">All Categories</option>
                 <option value="fries">Fries</option>
                 <option value="drinks">Drinks</option>
                 <option value="add-ons">Add-ons</option>
-                <option value="combos">Combos</option>
               </select>
             </div>
           </div>
 
-          <h3 className="text-lg font-bold mb-6">Transaction History</h3>
+          <h3 className="text-base md:text-lg font-bold mb-4 md:mb-6">Transaction History</h3>
           {filteredTransactions.length === 0 ? (
             <p className="text-slate-400 text-sm text-center py-8">No transactions in selected range.</p>
           ) : (
             <div>
-              <div className="mb-4 text-sm text-slate-600">
+              <div className="mb-3 md:mb-4 text-sm text-slate-600">
                 Showing <span className="font-bold">{Math.min(filteredTransactions.length, 50)}</span> of <span className="font-bold">{filteredTransactions.length}</span> transactions
               </div>
-              <div className="overflow-x-auto">
+              <div className="md:hidden space-y-2.5">
+                {filteredTransactions.slice(0, 50).map((tx, idx) => (
+                  <div key={tx.id} className="rounded-xl border border-slate-100 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <button
+                        onClick={() => setShowReceipt(tx)}
+                        className="text-slate-800 font-bold text-sm hover:text-orange-600 transition-colors cursor-pointer"
+                        title="View order summary"
+                      >
+                        {getTransactionLabel(tx, idx)}
+                      </button>
+                      <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded-lg text-[10px] font-bold uppercase">{getTransactionPaymentMethod(tx)}</span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">{formatDate(getRecordTimestamp(tx))}</p>
+                    <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                      <div>
+                        <p className="text-slate-400">Cashier</p>
+                        <p className="font-semibold text-slate-700 leading-4">{getTransactionCashierName(tx)}</p>
+                      </div>
+                      <div>
+                        <p className="text-slate-400">Items</p>
+                        <p className="font-semibold text-slate-700">{getTransactionItems(tx).length}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-slate-400">Amount</p>
+                        <p className="font-bold text-orange-600">{formatCurrency(tx.total)}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="hidden md:block overflow-x-auto">
                 <table className="w-full text-left">
                   <thead>
                     <tr className="text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-50">
-                      <th className="pb-4">Order ID</th>
+                      <th className="pb-4">Order</th>
                       <th className="pb-4">Date & Time</th>
                       <th className="pb-4">Cashier</th>
                       <th className="pb-4">Items</th>
@@ -1840,16 +2816,24 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {filteredTransactions.slice(0, 50).map(tx => (
+                    {filteredTransactions.slice(0, 50).map((tx, idx) => (
                       <tr key={tx.id} className="text-sm hover:bg-slate-50 transition-colors">
-                        <td className="py-3 font-mono text-xs text-slate-600 font-bold">{tx.id}</td>
-                        <td className="py-3 text-slate-700">{formatDate(tx.timestamp)}</td>
-                        <td className="py-3 font-medium text-slate-900">{tx.cashierName}</td>
-                        <td className="py-3 text-slate-600">{tx.items.length} item{tx.items.length !== 1 ? 's' : ''}</td>
                         <td className="py-3">
-                          <span className="px-3 py-1 bg-orange-100 text-orange-700 rounded-lg text-[10px] font-bold uppercase">{tx.paymentMethod}</span>
+                          <button
+                            onClick={() => setShowReceipt(tx)}
+                            className="text-slate-700 font-semibold hover:text-orange-600 transition-colors cursor-pointer"
+                            title="View order summary"
+                          >
+                            {getTransactionLabel(tx, idx)}
+                          </button>
                         </td>
-                        <td className="py-3 text-right font-bold text-orange-600">{formatCurrency(tx.total * 1.1)}</td>
+                        <td className="py-3 text-slate-700">{formatDate(getRecordTimestamp(tx))}</td>
+                        <td className="py-3 font-medium text-slate-900">{getTransactionCashierName(tx)}</td>
+                        <td className="py-3 text-slate-600">{getTransactionItems(tx).length} item{getTransactionItems(tx).length !== 1 ? 's' : ''}</td>
+                        <td className="py-3">
+                          <span className="px-3 py-1 bg-orange-100 text-orange-700 rounded-lg text-[10px] font-bold uppercase">{getTransactionPaymentMethod(tx)}</span>
+                        </td>
+                        <td className="py-3 text-right font-bold text-orange-600">{formatCurrency(tx.total)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1862,17 +2846,17 @@ export default function App() {
 
       {/* Insights Tab */}
       {reportTab === 'insights' && (
-        <div className="space-y-6">
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <div className="flex items-center justify-between mb-6">
+        <div className="space-y-4 md:space-y-6">
+          <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4 md:mb-6">
               <div>
-                <h3 className="text-lg font-bold">AI-Powered Business Insights</h3>
-                <p className="text-sm text-slate-500 mt-1">Get intelligent suggestions based on your sales data</p>
+                <h3 className="text-base md:text-lg font-bold">AI-Powered Business Insights</h3>
+                <p className="text-sm text-slate-500 mt-1">Intelligent suggestions based on your sales and inventory trends</p>
               </div>
               <button
                 onClick={fetchInsights}
                 disabled={insightsLoading || !filteredTransactions.length}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed cursor-pointer"
+                className="w-full sm:w-auto justify-center flex items-center gap-2 px-3 md:px-4 py-2 bg-blue-600 text-white rounded-xl text-xs md:text-sm font-semibold hover:bg-blue-700 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed cursor-pointer"
               >
                 {insightsLoading ? (
                   <>
@@ -1882,7 +2866,7 @@ export default function App() {
                 ) : (
                   <>
                     <Zap size={18} />
-                    Generate Insights
+                    Generate AI Insight
                   </>
                 )}
               </button>
@@ -1894,33 +2878,30 @@ export default function App() {
               </div>
             )}
 
-            {insights ? (
-              <div className="prose prose-sm max-w-none">
-                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-6 rounded-xl border border-blue-100">
-                  <div className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed font-sans">
-                    {insights.split('\n').map((line, idx) => (
-                      <div key={idx} className="mb-2">
-                        {line}
-                      </div>
+            <div className="mb-4 md:mb-6 rounded-xl border border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50 p-4 md:p-5">
+              <p className="text-xs font-bold uppercase tracking-wide text-blue-700 mb-2">AI Manager Summary</p>
+              {insights ? (
+                <div className="text-sm text-slate-700 leading-relaxed space-y-2">
+                  {insights
+                    .split('\n')
+                    .map(line => line.trim())
+                    .filter(Boolean)
+                    .map((line, idx) => (
+                      <p key={idx}>{line}</p>
                     ))}
-                  </div>
                 </div>
-              </div>
-            ) : (
-              <div className="text-center py-12">
-                <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <Zap size={32} className="text-slate-400" />
-                </div>
-                <p className="text-slate-500 mb-4">Click "Generate Insights" to analyze your sales data</p>
-                {filteredTransactions.length === 0 && (
-                  <p className="text-sm text-slate-400">You need some transactions to generate insights</p>
-                )}
-              </div>
-            )}
+              ) : (
+                <p className="text-sm text-slate-500">
+                  {insightsLoading
+                    ? 'Generating AI summary from your latest sales and stock data...'
+                    : 'Tap "Generate AI Insight" to create a summary from current POS data.'}
+                </p>
+              )}
+            </div>
 
             <div className="mt-6 p-4 bg-blue-50 border border-blue-100 rounded-xl">
               <p className="text-xs text-slate-600">
-                <strong>How it works:</strong> This tab uses Google Gemini API to analyze your current sales metrics, top products, and trends to provide actionable business recommendations.
+                <strong>How it works:</strong> Gemini analyzes your current transactions, product mix, categories, payments, and stock indicators to generate real-time business insights.
               </p>
             </div>
           </div>
@@ -1932,83 +2913,81 @@ export default function App() {
   // ─── RENDER: Users ────────────────────────────────────────────────────────
 
   const renderUsers = () => (
-    <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex justify-between items-center">
+    <div className="space-y-4 md:space-y-6 animate-in fade-in duration-500">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">User Management & Security</h1>
-          <p className="text-slate-500">Staff accounts, activity logs, and system security</p>
+          <h1 className="text-[30px] leading-9 md:text-2xl font-bold text-slate-900">User Management & Security</h1>
+          <p className="text-slate-500 text-sm md:text-base">Staff accounts, activity logs, and system security</p>
         </div>
         {isAdmin && (
-          <button onClick={() => { setNewUser({ name: '', email: '', role: 'cashier', password: '' }); setUserFormError(''); setShowAddUser(true); }} className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-xl text-sm font-medium hover:bg-orange-700 transition-colors cursor-pointer">
-            <Plus size={18} /> Add New User
+          <button onClick={() => { setNewUser({ name: '', email: '', role: 'cashier', password: '' }); setUserFormError(''); setShowAddUser(true); }} className="w-full sm:w-auto justify-center inline-flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-orange-600 text-white rounded-xl text-xs md:text-sm font-semibold hover:bg-orange-700 transition-colors cursor-pointer">
+            <Plus size={15} /> Add New User
           </button>
         )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 space-y-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+        <div className="lg:col-span-2 space-y-4 md:space-y-6">
           {/* Current user info */}
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Your Account</h3>
+          <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-xs md:text-sm font-bold text-slate-500 uppercase tracking-wider mb-3 md:mb-4">Your Account</h3>
             {currentUser && (
-              <div className="flex items-center gap-4">
-                <img src={currentUser.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
+              <div className="flex items-center gap-3 md:gap-4">
+                <img src={getUserAvatar(currentUser)} alt="" className="w-10 h-10 md:w-12 md:h-12 rounded-full object-cover" />
                 <div className="flex-1">
-                  <p className="text-sm font-bold text-slate-900">{currentUser.name}</p>
+                  <p className="text-sm md:text-base font-bold text-slate-900">{currentUser.name}</p>
                   <p className="text-xs text-slate-500">{currentUser.email}</p>
                 </div>
                 <span className={cn('px-2 py-1 rounded-full text-[10px] font-bold uppercase',
-                  currentUser.role === 'admin' ? 'bg-violet-50 text-violet-600' :
                   currentUser.role === 'manager' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600',
                 )}>
                   {currentUser.role}
                 </span>
               </div>
             )}
-            <p className="text-xs text-slate-500 mt-4">To switch roles, logout and login with a different account.</p>
+            <p className="text-xs text-slate-500 mt-3 md:mt-4">To switch roles, logout and login with a different account.</p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {users.map(user => (
-              <div key={user.id} className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-                <div className="flex items-center gap-4 mb-4">
-                  <img src={user.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
+              <div key={user.id} className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+                <div className="flex items-center gap-3 md:gap-4 mb-3 md:mb-4">
+                  <img src={getUserAvatar(user)} alt="" className="w-10 h-10 md:w-12 md:h-12 rounded-full object-cover" />
                   <div className="flex-1">
-                    <h3 className="font-bold text-slate-900">{user.name}</h3>
+                    <h3 className="text-sm md:text-base font-bold text-slate-900">{user.name}</h3>
                     <p className="text-xs text-slate-500">{user.email}</p>
                   </div>
                   <span className={cn('px-2 py-1 rounded-full text-[10px] font-bold uppercase',
-                    user.role === 'admin' ? 'bg-violet-50 text-violet-600' :
-                      user.role === 'manager' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600',
+                    user.role === 'manager' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600',
                   )}>
                     {user.role}
                   </span>
                 </div>
                 {isAdmin && (
                   <div className="flex gap-2">
-                    <button onClick={() => alert('Edit user feature coming soon. For now, delete and re-add the user with updated details.')} className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Edit</button>
-                    <button onClick={() => { const newPass = prompt('Send password reset email to ' + user.email + '?', 'yes'); if (newPass === 'yes') alert('✅ Password reset email sent to ' + user.email); }} className="flex-1 py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Reset Pass</button>
+                    <button onClick={() => openEditUserModal(user)} className="flex-1 py-1.5 md:py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Edit</button>
+                    <button onClick={() => openResetPasswordModal(user)} className="flex-1 py-1.5 md:py-2 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-colors cursor-pointer">Reset Pass</button>
                   </div>
                 )}
               </div>
             ))}
           </div>
 
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
-            <div className="p-6 border-b border-slate-50 flex justify-between items-center">
-              <h3 className="text-lg font-bold text-slate-900">System Activity Logs</h3>
+          <div className="bg-white rounded-xl md:rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <div className="p-4 md:p-6 border-b border-slate-50 flex justify-between items-center">
+              <h3 className="text-base md:text-lg font-bold text-slate-900">System Activity Logs</h3>
             </div>
-            <div className="p-6 space-y-4 max-h-[400px] overflow-y-auto">
+            <div className="p-4 md:p-6 space-y-3 md:space-y-4 max-h-[320px] md:max-h-[400px] overflow-y-auto">
               {activityLogs.length === 0 && <p className="text-sm text-slate-400 text-center py-8">No activity recorded yet.</p>}
               {activityLogs.slice(0, 30).map(log => (
-                <div key={log.id} className="flex gap-4 pb-4 border-b border-slate-50 last:border-0">
-                  <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 shrink-0">
-                    <Activity size={18} />
+                <div key={log.id} className="flex gap-3 md:gap-4 pb-3 md:pb-4 border-b border-slate-50 last:border-0">
+                  <div className="w-8 h-8 md:w-10 md:h-10 rounded-lg md:rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 shrink-0">
+                    <Activity size={16} />
                   </div>
                   <div className="flex-1">
                     <p className="text-sm font-bold text-slate-900">{log.action}</p>
-                    <p className="text-xs text-slate-500">{log.details}</p>
-                    <p className="text-[10px] text-slate-400 mt-1">{log.userName} · {formatDate(log.timestamp)}</p>
+                    <p className="text-xs text-slate-500">{getActivityDetails(log)}</p>
+                    <p className="text-[10px] text-slate-400 mt-1">{getActivityUserName(log)} - {formatDate(getRecordTimestamp(log))}</p>
                   </div>
                 </div>
               ))}
@@ -2016,13 +2995,13 @@ export default function App() {
           </div>
         </div>
 
-        <div className="space-y-6">
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold text-slate-900 mb-4">Security & Backup</h3>
-            <div className="space-y-4">
-              <button onClick={backupRecords} className="w-full flex items-center justify-between p-4 bg-slate-50 rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
+        <div className="space-y-4 md:space-y-6">
+          <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+            <h3 className="text-base md:text-lg font-bold text-slate-900 mb-3 md:mb-4">Security & Backup</h3>
+            <div className="space-y-3 md:space-y-4">
+              <button onClick={backupRecords} className="w-full flex items-center justify-between p-3 md:p-4 bg-slate-50 rounded-xl md:rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
                 <div className="flex items-center gap-3">
-                  <Database size={20} className="text-orange-500" />
+                  <Database size={18} className="text-orange-500" />
                   <div className="text-left">
                     <p className="text-sm font-bold text-slate-900">Backup Records</p>
                     <p className="text-[10px] text-slate-500">Last: 2 hours ago</p>
@@ -2030,9 +3009,9 @@ export default function App() {
                 </div>
                 <RefreshCw size={16} className="text-slate-400" />
               </button>
-              <button onClick={restoreSystem} className="w-full flex items-center justify-between p-4 bg-slate-50 rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
+              <button onClick={restoreSystem} className="w-full flex items-center justify-between p-3 md:p-4 bg-slate-50 rounded-xl md:rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
                 <div className="flex items-center gap-3">
-                  <Upload size={20} className="text-blue-500" />
+                  <Upload size={18} className="text-blue-500" />
                   <div className="text-left">
                     <p className="text-sm font-bold text-slate-900">Restore System</p>
                     <p className="text-[10px] text-slate-500">From cloud storage</p>
@@ -2041,9 +3020,9 @@ export default function App() {
                 <ArrowRightLeft size={16} className="text-slate-400" />
               </button>
               {lowStockCount > 0 && (
-                <div className="p-4 bg-rose-50 rounded-2xl border border-rose-100">
+                <div className="p-3 md:p-4 bg-rose-50 rounded-xl md:rounded-2xl border border-rose-100">
                   <div className="flex items-center gap-3 mb-2">
-                    <Shield size={20} className="text-rose-500" />
+                    <Shield size={18} className="text-rose-500" />
                     <p className="text-sm font-bold text-rose-900">Stock Alert</p>
                   </div>
                   <p className="text-xs text-rose-700">{lowStockCount} item{lowStockCount !== 1 ? 's' : ''} below minimum stock level.</p>
@@ -2053,21 +3032,58 @@ export default function App() {
           </div>
 
           {/* Promotions management */}
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold text-slate-900 mb-4">Active Promotions</h3>
+          <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
+            <div className="flex items-center justify-between gap-2 mb-3 md:mb-4">
+              <h3 className="text-base md:text-lg font-bold text-slate-900">Active Promotions</h3>
+              {isManager && (
+                <button
+                  onClick={openAddPromotionModal}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-600 text-white text-xs font-semibold hover:bg-orange-700 transition-colors cursor-pointer"
+                >
+                  <Plus size={13} />
+                  Add Promo
+                </button>
+              )}
+            </div>
             <div className="space-y-3">
               {promotions.map(p => (
-                <div key={p.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div key={p.id} className="flex items-center justify-between p-2.5 md:p-3 bg-slate-50 rounded-xl border border-slate-100">
                   <div>
                     <p className="text-sm font-bold text-slate-900">{p.code}</p>
                     <p className="text-xs text-slate-500">{p.description}</p>
                     <p className="text-xs text-orange-600 font-medium">
-                      {p.discountType === 'percentage' ? `${p.value}% off` : `$${p.value} off`}
+                      {getPromotionDiscountType(p) === 'percentage' ? `${p.value}% off` : `${formatCurrency(p.value)} off`}
                     </p>
                   </div>
-                  <span className={cn('text-[10px] font-bold px-2 py-1 rounded-full', p.active ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-200 text-slate-500')}>
-                    {p.active ? 'Active' : 'Off'}
-                  </span>
+                  <div className="flex items-center gap-1.5 ml-2">
+                    <span className={cn('text-[10px] font-bold px-2 py-1 rounded-full', p.active ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-200 text-slate-500')}>
+                      {p.active ? 'Active' : 'Off'}
+                    </span>
+                    {isManager && (
+                      <>
+                        <button
+                          onClick={() => togglePromotionActive(p)}
+                          className="px-2 py-1 text-[10px] font-bold rounded-md bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 cursor-pointer"
+                        >
+                          {p.active ? 'Disable' : 'Enable'}
+                        </button>
+                        <button
+                          onClick={() => openEditPromotionModal(p)}
+                          className="p-1.5 text-slate-500 hover:text-orange-600 hover:bg-white rounded-md transition-colors cursor-pointer"
+                          title="Edit promotion"
+                        >
+                          <Edit2 size={14} />
+                        </button>
+                        <button
+                          onClick={() => deletePromotion(p)}
+                          className="p-1.5 text-slate-500 hover:text-rose-600 hover:bg-white rounded-md transition-colors cursor-pointer"
+                          title="Delete promotion"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -2084,28 +3100,54 @@ export default function App() {
   // ─── Main layout ──────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
+    <div className="relative flex min-h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
+      {mobileSidebarOpen && (
+        <button
+          type="button"
+          aria-label="Close sidebar"
+          onClick={() => setMobileSidebarOpen(false)}
+          className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-[1px] lg:hidden"
+        />
+      )}
+
       {/* Sidebar */}
-      <aside className="w-64 bg-white border-r border-slate-100 flex flex-col p-6">
-        <div className="flex items-center gap-3 mb-10 px-2">
-          <div className="w-10 h-10 bg-orange-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-orange-200">
-            <ShoppingBag size={24} />
+      <aside className={cn(
+        'fixed inset-y-0 left-0 z-50 w-72 bg-white border-r border-slate-100 flex flex-col p-6 transition-transform duration-300 lg:static lg:z-auto lg:w-64 lg:translate-x-0',
+        mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full',
+      )}>
+        <div className="flex items-center justify-between mb-6 lg:mb-10 px-2">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-orange-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-orange-200">
+              <ShoppingBag size={24} />
+            </div>
+            <span className="text-xl font-black tracking-tight text-orange-900">SURFRIES.POS</span>
           </div>
-          <span className="text-xl font-black tracking-tight text-orange-900">SURFRIES.POS</span>
+          <button
+            type="button"
+            onClick={() => setMobileSidebarOpen(false)}
+            className="lg:hidden p-2 rounded-full hover:bg-slate-100 text-slate-500"
+            aria-label="Close menu"
+          >
+            <X size={18} />
+          </button>
         </div>
 
         <nav className="flex-1 space-y-2">
-          <SidebarItem icon={LayoutDashboard} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
-          <SidebarItem icon={ShoppingCart} label="Sales" active={activeTab === 'sales'} onClick={() => setActiveTab('sales')} />
-          <SidebarItem icon={Package} label="Products" active={activeTab === 'products'} onClick={() => setActiveTab('products')} />
-          <SidebarItem icon={ClipboardList} label="Inventory" active={activeTab === 'inventory'} onClick={() => setActiveTab('inventory')} badge={lowStockCount || undefined} />
-          <SidebarItem icon={BarChart3} label="Reports" active={activeTab === 'reports'} onClick={() => setActiveTab('reports')} />
-          {isManager && <SidebarItem icon={Users} label="Users & Security" active={activeTab === 'users'} onClick={() => setActiveTab('users')} />}
+          <SidebarItem icon={LayoutDashboard} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => navigateTo('dashboard')} />
+          <SidebarItem icon={ShoppingCart} label="Sales" active={activeTab === 'sales'} onClick={() => navigateTo('sales')} />
+          {canAccessManagerTabs && (
+            <>
+              <SidebarItem icon={Package} label="Products" active={activeTab === 'products'} onClick={() => navigateTo('products')} />
+              <SidebarItem icon={ClipboardList} label="Inventory" active={activeTab === 'inventory'} onClick={() => navigateTo('inventory')} badge={lowStockCount || undefined} />
+              <SidebarItem icon={BarChart3} label="Reports" active={activeTab === 'reports'} onClick={() => navigateTo('reports')} />
+              <SidebarItem icon={Users} label="Users & Security" active={activeTab === 'users'} onClick={() => navigateTo('users')} />
+            </>
+          )}
         </nav>
 
         <div className="mt-auto pt-6 border-t border-slate-50">
           <div className="flex items-center gap-3 px-2">
-            <img src={currentUser.avatar} alt="" className="w-10 h-10 rounded-full object-cover" />
+            <img src={getUserAvatar(currentUser)} alt="" className="w-10 h-10 rounded-full object-cover" />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-bold text-slate-900 truncate">{currentUser.name}</p>
               <p className="text-xs text-slate-500 capitalize">{currentUser.role}</p>
@@ -2118,10 +3160,18 @@ export default function App() {
       </aside>
 
       {/* Main */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <main className="flex-1 flex flex-col min-w-0 w-full overflow-hidden">
         {/* Top Bar */}
-        <header className="h-20 bg-white border-b border-slate-100 flex items-center justify-between px-8 shrink-0">
+        <header className="bg-white border-b border-slate-100 flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 md:px-8 py-3 shrink-0">
           <div className="flex items-center gap-4">
+            <button
+              type="button"
+              onClick={() => setMobileSidebarOpen(true)}
+              className="lg:hidden p-2 rounded-xl border border-slate-200 bg-white text-slate-600"
+              aria-label="Open menu"
+            >
+              <Menu size={18} />
+            </button>
             <div className="bg-slate-50 px-4 py-2 rounded-xl border border-slate-100">
               <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block">Current Store</span>
               <span className="text-sm font-bold text-slate-900">Downtown Branch #12</span>
@@ -2129,7 +3179,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             {lowStockCount > 0 && (
-              <button onClick={() => setActiveTab('inventory')} className="p-2 text-rose-500 hover:text-rose-700 transition-colors relative cursor-pointer">
+              <button onClick={() => setActiveTab(canAccessManagerTabs ? 'inventory' : 'sales')} className="p-2 text-rose-500 hover:text-rose-700 transition-colors relative cursor-pointer">
                 <AlertCircle size={22} />
                 <span className="absolute top-1 right-1 w-2 h-2 bg-rose-500 rounded-full border-2 border-white" />
               </button>
@@ -2143,13 +3193,13 @@ export default function App() {
         </header>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-8">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8">
           {activeTab === 'dashboard' && renderDashboard()}
           {activeTab === 'sales' && renderSales()}
-          {activeTab === 'products' && renderProducts()}
-          {activeTab === 'inventory' && renderInventory()}
-          {activeTab === 'reports' && renderReports()}
-          {activeTab === 'users' && renderUsers()}
+          {activeTab === 'products' && canAccessManagerTabs && renderProducts()}
+          {activeTab === 'inventory' && canAccessManagerTabs && renderInventory()}
+          {activeTab === 'reports' && canAccessManagerTabs && renderReports()}
+          {activeTab === 'users' && canAccessManagerTabs && renderUsers()}
         </div>
       </main>
 
@@ -2169,11 +3219,11 @@ export default function App() {
                 </div>
                 <h3 className="text-2xl font-bold text-slate-900">Order Successful!</h3>
                 <p className="text-slate-500">Transaction ID: {showReceipt.id}</p>
-                <p className="text-xs text-slate-400 mt-1">Payment: <span className="font-bold capitalize">{showReceipt.paymentMethod}</span></p>
+                <p className="text-xs text-slate-400 mt-1">Payment: <span className="font-bold capitalize">{getTransactionPaymentMethod(showReceipt)}</span></p>
               </div>
               <div className="p-8 space-y-6">
                 <div className="space-y-3">
-                  {showReceipt.items.map(item => (
+                  {getTransactionItems(showReceipt).map(item => (
                     <div key={item.id} className="flex justify-between text-sm">
                       <span className="text-slate-600">{item.quantity}x {item.name}</span>
                       <span className="font-medium text-slate-900">{formatCurrency(item.price * item.quantity)}</span>
@@ -2186,16 +3236,16 @@ export default function App() {
                   </div>
                   {showReceipt.discount > 0 && (
                     <div className="flex justify-between text-sm text-rose-500">
-                      <span>Discount ({showReceipt.discountCode})</span>
+                      <span>Discount ({getTransactionDiscountCode(showReceipt)})</span>
                       <span>-{formatCurrency(showReceipt.discount)}</span>
                     </div>
                   )}
                   <div className="flex justify-between text-sm text-slate-500">
-                    <span>Tax (10%)</span><span>{formatCurrency(showReceipt.total * 0.1)}</span>
+                    <span>Tax (10%)</span><span>{formatCurrency(showReceipt.tax ?? 0)}</span>
                   </div>
                   <div className="flex justify-between text-xl font-bold text-slate-900 pt-2">
                     <span>Total Paid</span>
-                    <span className="text-orange-600">{formatCurrency(showReceipt.total * 1.1)}</span>
+                    <span className="text-orange-600">{formatCurrency(showReceipt.total)}</span>
                   </div>
                 </div>
                 <div className="flex gap-3">
@@ -2209,6 +3259,39 @@ export default function App() {
       </AnimatePresence>
 
       {/* ── MODAL: Select Flavor for Fries ──────────────────────────────── */}
+      <AnimatePresence>
+        {showBackupSuccessModal && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              className="bg-white w-full max-w-md rounded-3xl shadow-2xl border border-slate-100 overflow-hidden"
+            >
+              <div className="p-8 text-center border-b border-slate-100">
+                <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <CheckCircle2 size={32} />
+                </div>
+                <h3 className="text-2xl font-bold text-slate-900">Backup Successful</h3>
+                <p className="text-sm text-slate-500 mt-2">Your formatted backup report has been downloaded.</p>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                  <p className="text-xs uppercase tracking-wide text-slate-500 font-bold">File Name</p>
+                  <p className="text-sm font-semibold text-slate-800 mt-1 break-all">{lastBackupFileName}</p>
+                </div>
+                <button
+                  onClick={() => setShowBackupSuccessModal(false)}
+                  className="w-full py-3 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-all cursor-pointer"
+                >
+                  Done
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {showFlavorModal && selectedProductForFlavor && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
@@ -2280,17 +3363,16 @@ export default function App() {
                       <option value="fries">Fries</option>
                       <option value="drinks">Drinks</option>
                       <option value="add-ons">Add-ons</option>
-                      <option value="combos">Combos</option>
                     </select>
                   </div>
                   <div className="space-y-1">
-                    <label className="text-xs font-bold text-slate-400 uppercase">Price ($)</label>
+                    <label className="text-xs font-bold text-slate-400 uppercase">Price ()</label>
                     <input type="number" value={newProduct.price} onChange={e => setNewProduct(p => ({ ...p, price: e.target.value }))} placeholder="0.00" min="0" step="0.01" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
-                    <label className="text-xs font-bold text-slate-400 uppercase">Cost ($)</label>
+                    <label className="text-xs font-bold text-slate-400 uppercase">Cost ()</label>
                     <input type="number" value={newProduct.cost} onChange={e => setNewProduct(p => ({ ...p, cost: e.target.value }))} placeholder="0.00" min="0" step="0.01" inputMode="decimal" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
                   </div>
                   <div className="space-y-1">
@@ -2377,16 +3459,76 @@ export default function App() {
                 <button onClick={() => setShowStockModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer"><X size={20} className="text-slate-400" /></button>
               </div>
               <div className="p-6 space-y-4">
+                {stockModalType === 'in' && (
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={stockForm.createNewItem}
+                      onChange={e => setStockForm(f => ({ ...f, createNewItem: e.target.checked }))}
+                      className="w-4 h-4 accent-orange-600"
+                    />
+                    Add new stock item
+                  </label>
+                )}
                 <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-400 uppercase">Ingredient / Item</label>
-                  <select
-                    value={stockForm.ingredientId}
-                    onChange={e => setStockForm(f => ({ ...f, ingredientId: e.target.value }))}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
-                  >
-                    {ingredients.map(ing => <option key={ing.id} value={ing.id}>{ing.name} ({ing.stock} {ing.unit})</option>)}
-                  </select>
+                  <label className="text-xs font-bold text-slate-400 uppercase">
+                    {stockForm.createNewItem && stockModalType === 'in' ? 'New Item Name' : 'Ingredient / Item'}
+                  </label>
+                  {stockForm.createNewItem && stockModalType === 'in' ? (
+                    <input
+                      type="text"
+                      value={stockForm.newItemName}
+                      onChange={e => setStockForm(f => ({ ...f, newItemName: e.target.value }))}
+                      placeholder="e.g. Cooking Oil"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                    />
+                  ) : (
+                    <select
+                      value={stockForm.ingredientId}
+                      onChange={e => setStockForm(f => ({ ...f, ingredientId: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                    >
+                      {ingredients.map(ing => <option key={ing.id} value={ing.id}>{ing.name} ({ing.stock} {ing.unit})</option>)}
+                    </select>
+                  )}
                 </div>
+                {stockForm.createNewItem && stockModalType === 'in' && (
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
+                      <select
+                        value={stockForm.newItemCategory}
+                        onChange={e => setStockForm(f => ({ ...f, newItemCategory: e.target.value as Ingredient['category'] }))}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                      >
+                        <option value="raw">Raw</option>
+                        <option value="packaging">Packaging</option>
+                        <option value="sauce">Sauce</option>
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-400 uppercase">Unit</label>
+                      <input
+                        type="text"
+                        value={stockForm.newItemUnit}
+                        onChange={e => setStockForm(f => ({ ...f, newItemUnit: e.target.value }))}
+                        placeholder="kg / pcs / L"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-400 uppercase">Low Alert</label>
+                      <input
+                        type="number"
+                        value={stockForm.newItemLowStockThreshold}
+                        onChange={e => setStockForm(f => ({ ...f, newItemLowStockThreshold: e.target.value }))}
+                        placeholder="10"
+                        min="0"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                      />
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">Quantity</label>
@@ -2403,9 +3545,19 @@ export default function App() {
                     <label className="text-xs font-bold text-slate-400 uppercase">Unit</label>
                     <input
                       type="text"
-                      disabled
-                      className="w-full bg-slate-100 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-400"
-                      value={ingredients.find(i => i.id === stockForm.ingredientId)?.unit || ''}
+                      disabled={!(stockForm.createNewItem && stockModalType === 'in')}
+                      onChange={e => setStockForm(f => ({ ...f, newItemUnit: e.target.value }))}
+                      className={cn(
+                        'w-full border border-slate-200 rounded-xl px-4 py-3 text-sm',
+                        stockForm.createNewItem && stockModalType === 'in'
+                          ? 'bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-500/20'
+                          : 'bg-slate-100 text-slate-400',
+                      )}
+                      value={
+                        stockForm.createNewItem && stockModalType === 'in'
+                          ? stockForm.newItemUnit
+                          : (ingredients.find(i => i.id === stockForm.ingredientId)?.unit || '')
+                      }
                     />
                   </div>
                 </div>
@@ -2439,6 +3591,171 @@ export default function App() {
 
       {/* ── MODAL: Add User ───────────────────────────────────────────────── */}
       <AnimatePresence>
+        {showPromotionModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-slate-100"
+            >
+              <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+                <h3 className="text-xl font-black text-slate-900">{selectedPromotionForEdit ? 'Edit Promotion' : 'Add Promotion'}</h3>
+                <button onClick={() => setShowPromotionModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer">
+                  <X size={20} className="text-slate-400" />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Promo Code</label>
+                  <input
+                    type="text"
+                    value={promotionForm.code}
+                    onChange={e => setPromotionForm(prev => ({ ...prev, code: e.target.value.toUpperCase() }))}
+                    placeholder="WELCOME10"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Description</label>
+                  <input
+                    type="text"
+                    value={promotionForm.description}
+                    onChange={e => setPromotionForm(prev => ({ ...prev, description: e.target.value }))}
+                    placeholder="10% off for new customers"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Discount Type</label>
+                    <select
+                      value={promotionForm.discount_type}
+                      onChange={e => setPromotionForm(prev => ({ ...prev, discount_type: e.target.value as Promotion['discount_type'] }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer"
+                    >
+                      <option value="percentage">Percentage (%)</option>
+                      <option value="fixed">Fixed Amount (₱)</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">Value</label>
+                    <input
+                      type="number"
+                      value={promotionForm.value}
+                      onChange={e => setPromotionForm(prev => ({ ...prev, value: e.target.value }))}
+                      placeholder={promotionForm.discount_type === 'percentage' ? '10' : '20'}
+                      min="0"
+                      step="0.01"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                    />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={promotionForm.active}
+                    onChange={e => setPromotionForm(prev => ({ ...prev, active: e.target.checked }))}
+                    className="w-4 h-4 accent-orange-600"
+                  />
+                  Active promotion
+                </label>
+                {promotionFormError && <p className="text-rose-500 text-xs font-medium">{promotionFormError}</p>}
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button onClick={() => setShowPromotionModal(false)} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer">Cancel</button>
+                <button onClick={savePromotion} disabled={isSavingPromotion} className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 shadow-lg shadow-orange-600/20 transition-all cursor-pointer disabled:opacity-50">
+                  {isSavingPromotion ? 'Saving...' : (selectedPromotionForEdit ? 'Save Changes' : 'Create Promo')}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showEditUserModal && selectedUserForEdit && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-slate-100"
+            >
+              <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+                <h3 className="text-xl font-black text-slate-900">Edit Staff Account</h3>
+                <button onClick={() => setShowEditUserModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer"><X size={20} className="text-slate-400" /></button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Email</label>
+                  <input type="email" disabled value={selectedUserForEdit.email} className="w-full bg-slate-100 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-400" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Full Name</label>
+                  <input type="text" value={editUserForm.name} onChange={e => setEditUserForm(prev => ({ ...prev, name: e.target.value }))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Role</label>
+                  <select value={editUserForm.role} onChange={e => setEditUserForm(prev => ({ ...prev, role: e.target.value as Role }))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
+                    <option value="cashier">Cashier</option>
+                    <option value="manager">Manager</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Avatar URL (Optional)</label>
+                  <input type="text" value={editUserForm.avatar_url} onChange={e => setEditUserForm(prev => ({ ...prev, avatar_url: e.target.value }))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                </div>
+                {editUserFormError && <p className="text-rose-500 text-xs font-medium">{editUserFormError}</p>}
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button onClick={() => setShowEditUserModal(false)} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer">Cancel</button>
+                <button onClick={submitEditUser} disabled={isSavingUserEdit} className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all cursor-pointer">
+                  {isSavingUserEdit ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showResetPassModal && selectedUserForReset && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-slate-100"
+            >
+              <div className="p-6 border-b border-slate-50 flex justify-between items-center">
+                <h3 className="text-xl font-black text-slate-900">Reset User Password</h3>
+                <button onClick={() => setShowResetPassModal(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer"><X size={20} className="text-slate-400" /></button>
+              </div>
+              <div className="p-6 space-y-4">
+                <p className="text-sm text-slate-600">Set a new password for <span className="font-bold text-slate-900">{selectedUserForReset.name}</span>.</p>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">New Password</label>
+                  <input type="password" value={newPasswordForm.password} onChange={e => setNewPasswordForm(prev => ({ ...prev, password: e.target.value }))} placeholder="At least 8 characters" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Confirm Password</label>
+                  <input type="password" value={newPasswordForm.confirmPassword} onChange={e => setNewPasswordForm(prev => ({ ...prev, confirmPassword: e.target.value }))} placeholder="Re-enter password" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20" />
+                </div>
+                {resetPassFormError && <p className="text-rose-500 text-xs font-medium">{resetPassFormError}</p>}
+              </div>
+              <div className="p-6 bg-slate-50 flex gap-3">
+                <button onClick={() => setShowResetPassModal(false)} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer">Cancel</button>
+                <button onClick={submitResetPassword} disabled={isResettingPassword} className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-all cursor-pointer">
+                  {isResettingPassword ? 'Resetting...' : 'Reset Password'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {showAddUser && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
             <motion.div
@@ -2465,7 +3782,6 @@ export default function App() {
                   <select value={newUser.role} onChange={e => setNewUser(u => ({ ...u, role: e.target.value as Role }))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20">
                     <option value="cashier">Cashier</option>
                     <option value="manager">Manager</option>
-                    <option value="admin">Admin</option>
                   </select>
                 </div>
                 <div className="space-y-1">
@@ -2485,3 +3801,6 @@ export default function App() {
     </div>
   );
 }
+
+
+
