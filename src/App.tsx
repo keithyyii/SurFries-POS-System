@@ -177,8 +177,11 @@ const getTransactionCashierName = (tx: any) =>
 const getTransactionDiscountCode = (tx: any) =>
   tx?.discount_code ?? tx?.discountCode;
 
-const getTransactionLabel = (_tx: any, index: number) =>
-  `Order ${String(index + 1).padStart(3, '0')}`;
+const getTransactionLabel = (_tx: any, index: number, totalCount?: number) => {
+  const total = totalCount ?? (index + 1);
+  const orderNumber = Math.max(1, total - index);
+  return `Order ${String(orderNumber).padStart(3, '0')}`;
+};
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
@@ -350,6 +353,7 @@ export default function App() {
   const [reportRange, setReportRange] = useState('monthly');
   const [reportCategory, setReportCategory] = useState('all');
   const [reportTab, setReportTab] = useState('overview');
+  const [transactionDisplayLimit, setTransactionDisplayLimit] = useState(50);
   const [insights, setInsights] = useState<string | null>(null);
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [insightsError, setInsightsError] = useState<string | null>(null);
@@ -1320,7 +1324,7 @@ export default function App() {
       .map(
         (tx, idx) => `
           <tr>
-            <td>${escapeHtml(getTransactionLabel(tx, idx))}</td>
+            <td>${escapeHtml(getTransactionLabel(tx, idx, filteredTransactions.length))}</td>
             <td>${escapeHtml(formatDate(getRecordTimestamp(tx)))}</td>
             <td>${escapeHtml(getTransactionCashierName(tx))}</td>
             <td>${getTransactionItems(tx).length}</td>
@@ -1825,6 +1829,14 @@ export default function App() {
       return inTime && inCat;
     });
   }, [transactions, reportRange, reportCategory]);
+  const visibleReportTransactions = useMemo(
+    () => filteredTransactions.slice(0, transactionDisplayLimit),
+    [filteredTransactions, transactionDisplayLimit],
+  );
+
+  useEffect(() => {
+    setTransactionDisplayLimit(50);
+  }, [reportRange, reportCategory, reportTab]);
 
   const reportProductPerformance = useMemo(() => {
     const soldByProductId: Record<string, { sold: number; sales: number }> = {};
@@ -2776,10 +2788,10 @@ export default function App() {
           ) : (
             <div>
               <div className="mb-3 md:mb-4 text-sm text-slate-600">
-                Showing <span className="font-bold">{Math.min(filteredTransactions.length, 50)}</span> of <span className="font-bold">{filteredTransactions.length}</span> transactions
+                Showing <span className="font-bold">{visibleReportTransactions.length}</span> of <span className="font-bold">{filteredTransactions.length}</span> transactions
               </div>
               <div className="md:hidden space-y-2.5">
-                {filteredTransactions.slice(0, 50).map((tx, idx) => (
+                {visibleReportTransactions.map((tx, idx) => (
                   <div key={tx.id} className="rounded-xl border border-slate-100 p-3">
                     <div className="flex items-start justify-between gap-2">
                       <button
@@ -2787,7 +2799,7 @@ export default function App() {
                         className="text-slate-800 font-bold text-sm hover:text-orange-600 transition-colors cursor-pointer"
                         title="View order summary"
                       >
-                        {getTransactionLabel(tx, idx)}
+                        {getTransactionLabel(tx, idx, filteredTransactions.length)}
                       </button>
                       <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded-lg text-[10px] font-bold uppercase">{getTransactionPaymentMethod(tx)}</span>
                     </div>
@@ -2822,7 +2834,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {filteredTransactions.slice(0, 50).map((tx, idx) => (
+                    {visibleReportTransactions.map((tx, idx) => (
                       <tr key={tx.id} className="text-sm hover:bg-slate-50 transition-colors">
                         <td className="py-3">
                           <button
@@ -2830,7 +2842,7 @@ export default function App() {
                             className="text-slate-700 font-semibold hover:text-orange-600 transition-colors cursor-pointer"
                             title="View order summary"
                           >
-                            {getTransactionLabel(tx, idx)}
+                            {getTransactionLabel(tx, idx, filteredTransactions.length)}
                           </button>
                         </td>
                         <td className="py-3 text-slate-700">{formatDate(getRecordTimestamp(tx))}</td>
@@ -2845,6 +2857,16 @@ export default function App() {
                   </tbody>
                 </table>
               </div>
+              {filteredTransactions.length > visibleReportTransactions.length && (
+                <div className="mt-4 flex justify-center">
+                  <button
+                    onClick={() => setTransactionDisplayLimit(prev => prev + 50)}
+                    className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                  >
+                    Load 50 More
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

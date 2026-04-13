@@ -217,16 +217,29 @@ export async function processSale(
  */
 export async function fetchTransactions() {
   try {
-    const { data, error } = await supabase
-      .from('transactions')
-      .select(`
-        *,
-        transaction_items (*)
-      `)
-      .order('created_at', { ascending: false });
+    const pageSize = 1000;
+    let from = 0;
+    const allRows: any[] = [];
 
-    if (error) throw error;
-    return { success: true, data };
+    while (true) {
+      const { data, error } = await supabase
+        .from('transactions')
+        .select(`
+          *,
+          transaction_items (*)
+        `)
+        .order('created_at', { ascending: false })
+        .range(from, from + pageSize - 1);
+
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+
+      allRows.push(...data);
+      if (data.length < pageSize) break;
+      from += pageSize;
+    }
+
+    return { success: true, data: allRows };
   } catch (error) {
     console.error('Error fetching transactions:', error);
     return { success: false, error };
