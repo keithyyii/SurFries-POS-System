@@ -175,3 +175,28 @@ export async function resetStaffPassword(staffId: string, newPassword: string) {
     return { success: false, error };
   }
 }
+
+/**
+ * Verify user password for sensitive actions (keeps current session auth-based validation)
+ */
+export async function verifyUserPassword(email: string, password: string) {
+  try {
+    if (!email || !password) {
+      return { success: false, error: 'Email and password are required.' };
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email.toLowerCase(),
+      password,
+    });
+
+    if (error || !data.user) {
+      return { success: false, error: error?.message || 'Invalid password.' };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error verifying password:', error);
+    return { success: false, error: 'Failed to verify password.' };
+  }
+}

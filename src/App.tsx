@@ -101,6 +101,7 @@ import {
   fetchAllUsers,
   updateStaffAccount,
   resetStaffPassword,
+  verifyUserPassword,
 } from './authService';
 
 // ─── tiny helpers ────────────────────────────────────────────────────────────
@@ -181,6 +182,12 @@ const getTransactionLabel = (_tx: any, index: number, totalCount?: number) => {
   const total = totalCount ?? (index + 1);
   const orderNumber = Math.max(1, total - index);
   return `Order ${String(orderNumber).padStart(3, '0')}`;
+};
+
+const getMonthKey = (value: string | number | Date) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 };
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
@@ -351,6 +358,7 @@ export default function App() {
 
   // Reports
   const [reportRange, setReportRange] = useState('monthly');
+  const [reportMonth, setReportMonth] = useState(() => getMonthKey(new Date()));
   const [reportCategory, setReportCategory] = useState('all');
   const [reportTab, setReportTab] = useState('overview');
   const [transactionDisplayLimit, setTransactionDisplayLimit] = useState(50);
@@ -392,7 +400,14 @@ export default function App() {
   const [isResettingPassword, setIsResettingPassword] = useState(false);
   const [isSavingPromotion, setIsSavingPromotion] = useState(false);
   const [showLogoutConfirmModal, setShowLogoutConfirmModal] = useState(false);
+  const [showExportAuthModal, setShowExportAuthModal] = useState(false);
+  const [pendingExportAction, setPendingExportAction] = useState<'pdf' | 'excel' | 'backup' | null>(null);
+  const [exportAuthPassword, setExportAuthPassword] = useState('');
+  const [exportAuthError, setExportAuthError] = useState('');
+  const [isVerifyingExportAuth, setIsVerifyingExportAuth] = useState(false);
   const [showBackupSuccessModal, setShowBackupSuccessModal] = useState(false);
+  const [showRestoreConfirmModal, setShowRestoreConfirmModal] = useState(false);
+  const [showRestoreSuccessModal, setShowRestoreSuccessModal] = useState(false);
   const [lastBackupFileName, setLastBackupFileName] = useState('');
   const [productToDelete, setProductToDelete] = useState<Product | null>(null);
 
@@ -1216,12 +1231,46 @@ export default function App() {
     logActivity('Promotion Delete', `Deleted promo ${promotion.code}`);
   };
 
+  const requestProtectedExport = (action: 'pdf' | 'excel' | 'backup') => {
+    if (!isManager) return;
+    setPendingExportAction(action);
+    setExportAuthPassword('');
+    setExportAuthError('');
+    setShowExportAuthModal(true);
+  };
+
+  const confirmProtectedExport = async () => {
+    if (!currentUser || !pendingExportAction) return;
+    if (!exportAuthPassword.trim()) {
+      setExportAuthError('Password is required.');
+      return;
+    }
+
+    setIsVerifyingExportAuth(true);
+    setExportAuthError('');
+    const verifyResult = await verifyUserPassword(currentUser.email, exportAuthPassword);
+    setIsVerifyingExportAuth(false);
+
+    if (!verifyResult.success) {
+      setExportAuthError(typeof verifyResult.error === 'string' ? verifyResult.error : 'Invalid password.');
+      return;
+    }
+
+    setShowExportAuthModal(false);
+    setExportAuthPassword('');
+
+    if (pendingExportAction === 'pdf') exportPDF();
+    if (pendingExportAction === 'excel') exportExcel();
+    if (pendingExportAction === 'backup') backupRecords();
+    setPendingExportAction(null);
+  };
+
   const exportPDF = () => {
     // Simple PDF export - creates a printable report
     const reportWindow = window.open('', '', 'height=600,width=800');
     if (!reportWindow) return;
     
-    const productRows = topProducts
+    const productRows = reportTopProducts
       .map(p => `<tr><td>${p.name}</td><td>${p.qty}</td><td>${formatCurrency(p.revenue)}</td></tr>`)
       .join('');
 
@@ -1249,7 +1298,7 @@ export default function App() {
             <p><strong>Total Transactions:</strong> ${filteredTransactions.length}</p>
             <p><strong>Total Revenue:</strong> ${formatCurrency(reportRevenue)}</p>
             <p><strong>Total Discounts:</strong> ${formatCurrency(reportDiscount)}</p>
-            <p><strong>Average Order Value:</strong> ${formatCurrency(avgOrderValue)}</p>
+            <p><strong>Average Order Value:</strong> ${formatCurrency(reportAvgOrderValue)}</p>
           </div>
 
           <h2>Top Selling Products</h2>
@@ -1294,7 +1343,7 @@ export default function App() {
         maximumFractionDigits: 2,
       })}`;
 
-    const topProductRows = (topProducts.length ? topProducts : [])
+    const topProductRows = (reportTopProducts.length ? reportTopProducts : [])
       .map(
         (p, idx) => `
           <tr>
@@ -1307,7 +1356,7 @@ export default function App() {
       )
       .join('');
 
-    const categoryRows = (categoryBreakdown.length ? categoryBreakdown : [])
+    const categoryRows = (reportCategoryBreakdown.length ? reportCategoryBreakdown : [])
       .map(
         c => `
           <tr>
@@ -1362,7 +1411,7 @@ export default function App() {
               <td class="meta-label">Generated:</td>
               <td class="meta-value">${escapeHtml(generatedAt)}</td>
               <td class="meta-label">Date Range:</td>
-              <td class="meta-value">${escapeHtml(reportRange)}</td>
+              <td class="meta-value">${escapeHtml(reportDateRangeLabel)}</td>
               <td class="meta-label">Category:</td>
               <td class="meta-value">${escapeHtml(reportCategory)}</td>
             </tr>
@@ -1374,7 +1423,7 @@ export default function App() {
               <td class="metric">Revenue</td>
               <td class="metric-value">${formatExcelPeso(reportRevenue)}</td>
               <td class="metric">Average Order Value</td>
-              <td class="metric-value">${formatExcelPeso(avgOrderValue)}</td>
+              <td class="metric-value">${formatExcelPeso(reportAvgOrderValue)}</td>
             </tr>
             <tr>
               <td class="metric">Discounts Given</td>
@@ -1683,11 +1732,13 @@ export default function App() {
   };
 
   const restoreSystem = () => {
-    const confirmed = confirm('⚠️ Restore System?\n\nThis will restore all data from the latest backup. Current unsaved changes will be lost. Continue?');
-    if (confirmed) {
-      alert('✅ Restore Complete!\n\nSystem has been restored from backup.');
-      logActivity('Restore', 'System restored from backup');
-    }
+    setShowRestoreConfirmModal(true);
+  };
+
+  const confirmRestoreSystem = () => {
+    setShowRestoreConfirmModal(false);
+    setShowRestoreSuccessModal(true);
+    logActivity('Restore', 'System restored from backup');
   };
 
   // ─── Analytics Helpers ────────────────────────────────────────────────────
@@ -1815,28 +1866,101 @@ export default function App() {
 
   // ─── Filtered report transactions ────────────────────────────────────────
 
+  const availableReportMonths = useMemo(() => {
+    const monthKeys = Array.from(
+      new Set(
+        transactions
+          .map(tx => getMonthKey(getRecordTimestamp(tx)))
+          .filter(Boolean),
+      ),
+    ).sort((a, b) => b.localeCompare(a));
+
+    return monthKeys.map(monthKey => ({
+      value: monthKey,
+      label: new Date(`${monthKey}-01T00:00:00`).toLocaleDateString('en-US', {
+        month: 'long',
+        year: 'numeric',
+      }),
+    }));
+  }, [transactions]);
+
+  useEffect(() => {
+    if (!availableReportMonths.length) return;
+    const hasSelectedMonth = availableReportMonths.some(month => month.value === reportMonth);
+    if (!hasSelectedMonth) setReportMonth(availableReportMonths[0].value);
+  }, [availableReportMonths, reportMonth]);
+
+  const selectedReportMonthLabel = useMemo(() => {
+    const month = availableReportMonths.find(option => option.value === reportMonth);
+    return month?.label ?? 'Current Month';
+  }, [availableReportMonths, reportMonth]);
+
+  const reportDateRangeLabel = reportRange === 'monthly' ? selectedReportMonthLabel : reportRange;
+
   const filteredTransactions = useMemo(() => {
     const now = Date.now();
     const ranges: Record<string, number> = {
       daily: 24 * 60 * 60 * 1000,
       weekly: 7 * 24 * 60 * 60 * 1000,
-      monthly: 30 * 24 * 60 * 60 * 1000,
     };
-    const cutoff = ranges[reportRange] ? now - ranges[reportRange] : 0;
     return transactions.filter(tx => {
-      const inTime = cutoff === 0 || new Date(getRecordTimestamp(tx)).getTime() >= cutoff;
+      const timestamp = getRecordTimestamp(tx);
+      let inTime = true;
+
+      if (reportRange === 'monthly') {
+        inTime = getMonthKey(timestamp) === reportMonth;
+      } else {
+        const cutoff = ranges[reportRange] ? now - ranges[reportRange] : 0;
+        inTime = cutoff === 0 || new Date(timestamp).getTime() >= cutoff;
+      }
+
       const inCat = reportCategory === 'all' || getTransactionItems(tx).some(item => item.category === reportCategory);
       return inTime && inCat;
     });
-  }, [transactions, reportRange, reportCategory]);
+  }, [transactions, reportRange, reportMonth, reportCategory]);
   const visibleReportTransactions = useMemo(
     () => filteredTransactions.slice(0, transactionDisplayLimit),
     [filteredTransactions, transactionDisplayLimit],
   );
 
+  const reportRevenueChartData = useMemo(() => {
+    if (reportRange === 'monthly') {
+      const [yearText, monthText] = reportMonth.split('-');
+      const year = Number(yearText);
+      const month = Number(monthText);
+      if (!year || !month) return [];
+
+      const daysInMonth = new Date(year, month, 0).getDate();
+      return Array.from({ length: daysInMonth }, (_, i) => {
+        const day = i + 1;
+        const sales = filteredTransactions
+          .filter(tx => {
+            const date = new Date(getRecordTimestamp(tx));
+            return date.getFullYear() === year && date.getMonth() + 1 === month && date.getDate() === day;
+          })
+          .reduce((sum, tx) => sum + tx.total, 0);
+
+        return { name: String(day), sales: Math.round(sales * 100) / 100 };
+      });
+    }
+
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const now = new Date();
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(now);
+      d.setDate(now.getDate() - (6 - i));
+      const label = days[d.getDay()];
+      const dateStr = d.toDateString();
+      const sales = filteredTransactions
+        .filter(tx => new Date(getRecordTimestamp(tx)).toDateString() === dateStr)
+        .reduce((sum, tx) => sum + tx.total, 0);
+      return { name: label, sales: Math.round(sales * 100) / 100 };
+    });
+  }, [filteredTransactions, reportRange, reportMonth]);
+
   useEffect(() => {
     setTransactionDisplayLimit(50);
-  }, [reportRange, reportCategory, reportTab]);
+  }, [reportRange, reportMonth, reportCategory, reportTab]);
 
   const reportProductPerformance = useMemo(() => {
     const soldByProductId: Record<string, { sold: number; sales: number }> = {};
@@ -1867,6 +1991,36 @@ export default function App() {
       .sort((a, b) => b.sales - a.sales);
   }, [filteredTransactions, products]);
 
+  const reportTopProducts = useMemo(
+    () =>
+      reportProductPerformance
+        .filter(product => product.sold > 0)
+        .map(product => ({
+          name: product.name,
+          qty: product.sold,
+          revenue: product.sales,
+        }))
+        .slice(0, 5),
+    [reportProductPerformance],
+  );
+
+  const reportCategoryBreakdown = useMemo(() => {
+    const map: Record<string, { revenue: number; qty: number }> = {};
+    filteredTransactions.forEach(tx =>
+      getTransactionItems(tx).forEach(item => {
+        if (!map[item.category]) map[item.category] = { revenue: 0, qty: 0 };
+        map[item.category].revenue += item.price * item.quantity;
+        map[item.category].qty += item.quantity;
+      }),
+    );
+
+    return Object.entries(map).map(([name, values]) => ({
+      name,
+      revenue: Math.round(values.revenue * 100) / 100,
+      qty: values.qty,
+    }));
+  }, [filteredTransactions]);
+
   const reportUnitsSold = useMemo(
     () => reportProductPerformance.reduce((sum, item) => sum + item.sold, 0),
     [reportProductPerformance],
@@ -1883,6 +2037,7 @@ export default function App() {
   const reportRevenue = filteredTransactions.reduce((s, t) => s + t.total, 0);
   const reportDiscount = filteredTransactions.reduce((s, t) => s + t.discount, 0);
   const reportRefunds = filteredTransactions.filter(t => t.status === 'refunded').length;
+  const reportAvgOrderValue = filteredTransactions.length ? reportRevenue / filteredTransactions.length : 0;
 
   // ─── RENDER: Dashboard ───────────────────────────────────────────────────
 
@@ -1891,41 +2046,15 @@ export default function App() {
     setInsightsError(null);
 
     try {
-      const filteredCategoryMap: Record<string, { revenue: number; qty: number }> = {};
-
-      filteredTransactions.forEach(tx => {
-        getTransactionItems(tx).forEach(item => {
-          if (!filteredCategoryMap[item.category]) {
-            filteredCategoryMap[item.category] = { revenue: 0, qty: 0 };
-          }
-          filteredCategoryMap[item.category].revenue += item.price * item.quantity;
-          filteredCategoryMap[item.category].qty += item.quantity;
-        });
-      });
-
-      const filteredTopProducts = reportProductPerformance
-        .filter(product => product.sold > 0)
-        .map(product => ({
-          name: product.name,
-          qty: product.sold,
-          revenue: product.sales,
-        }))
-        .slice(0, 5);
-      const filteredCategoryBreakdown = Object.entries(filteredCategoryMap).map(([name, values]) => ({
-        name,
-        revenue: Math.round(values.revenue * 100) / 100,
-        qty: values.qty,
-      }));
-
       const reportData = {
         transactionCount: filteredTransactions.length,
         totalRevenue: reportRevenue,
         totalDiscount: reportDiscount,
-        avgOrderValue,
-        topProducts: filteredTopProducts,
-        categoryBreakdown: filteredCategoryBreakdown,
+        avgOrderValue: reportAvgOrderValue,
+        topProducts: reportTopProducts,
+        categoryBreakdown: reportCategoryBreakdown,
         transactions: filteredTransactions,
-        reportRange,
+        reportRange: reportDateRangeLabel,
         reportCategory,
         lowStockCount,
         productPerformance: reportProductPerformance.slice(0, 12),
@@ -1950,10 +2079,12 @@ export default function App() {
     filteredTransactions,
     reportRevenue,
     reportDiscount,
-    avgOrderValue,
-    reportRange,
+    reportAvgOrderValue,
+    reportDateRangeLabel,
     reportCategory,
     lowStockCount,
+    reportTopProducts,
+    reportCategoryBreakdown,
     reportProductPerformance,
     reportEstimatedProfit,
     reportUnitsSold,
@@ -1963,7 +2094,7 @@ export default function App() {
   useEffect(() => {
     setInsights(null);
     setInsightsError(null);
-  }, [reportRange, reportCategory]);
+  }, [reportRange, reportMonth, reportCategory]);
 
   const renderDashboard = () => (
     <div className="space-y-6 animate-in fade-in duration-500 text-slate-900">
@@ -2598,10 +2729,10 @@ export default function App() {
           <p className="text-slate-500 text-sm md:text-base">Detailed business performance and forecasts</p>
         </div>
         <div className="flex gap-2 w-full sm:w-auto">
-          <button onClick={exportPDF} className="flex-1 sm:flex-none justify-center flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-white border border-slate-200 rounded-xl text-xs md:text-sm font-semibold hover:bg-slate-50 transition-colors cursor-pointer">
+          <button onClick={() => requestProtectedExport('pdf')} className="flex-1 sm:flex-none justify-center flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-white border border-slate-200 rounded-xl text-xs md:text-sm font-semibold hover:bg-slate-50 transition-colors cursor-pointer">
             <Download size={15} /> Export PDF
           </button>
-          <button onClick={exportExcel} className="flex-1 sm:flex-none justify-center flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-white border border-slate-200 rounded-xl text-xs md:text-sm font-semibold hover:bg-slate-50 transition-colors cursor-pointer">
+          <button onClick={() => requestProtectedExport('excel')} className="flex-1 sm:flex-none justify-center flex items-center gap-1.5 px-3 py-2 md:px-4 md:py-2.5 bg-white border border-slate-200 rounded-xl text-xs md:text-sm font-semibold hover:bg-slate-50 transition-colors cursor-pointer">
             <Database size={15} /> Export Excel
           </button>
         </div>
@@ -2654,6 +2785,16 @@ export default function App() {
                   <option value="monthly">Monthly</option>
                 </select>
               </div>
+              {reportRange === 'monthly' && (
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-400 uppercase">Month</label>
+                  <select value={reportMonth} onChange={e => setReportMonth(e.target.value)} className="w-full sm:w-48 bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+                    {availableReportMonths.map(month => (
+                      <option key={month.value} value={month.value}>{month.label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="space-y-1">
                 <label className="text-xs font-bold text-slate-400 uppercase">Category</label>
                 <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-full sm:w-48 bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
@@ -2670,7 +2811,7 @@ export default function App() {
                 <h3 className="text-base md:text-lg font-bold mb-4 md:mb-6">Revenue Breakdown</h3>
                 <div className="h-[240px] md:h-[300px]">
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={weekChartData}>
+                    <AreaChart data={reportRevenueChartData}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                       <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
                       <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
@@ -2697,7 +2838,7 @@ export default function App() {
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-sm text-slate-500">Avg. Order Value</span>
-                    <span className="text-sm font-bold">{formatCurrency(avgOrderValue)}</span>
+                    <span className="text-sm font-bold">{formatCurrency(reportAvgOrderValue)}</span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-sm text-slate-500">Refunds</span>
@@ -2711,7 +2852,7 @@ export default function App() {
           {/* Top Products Report */}
           <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
             <h3 className="text-base md:text-lg font-bold mb-4 md:mb-6">Top Selling Products</h3>
-            {topProducts.length === 0 ? (
+            {reportTopProducts.length === 0 ? (
               <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
             ) : (
               <div className="overflow-x-auto">
@@ -2724,7 +2865,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {topProducts.map((row, i) => (
+                    {reportTopProducts.map((row, i) => (
                       <tr key={i} className="text-sm hover:bg-slate-50 transition-colors">
                         <td className="py-4 font-bold">{row.name}</td>
                         <td className="py-4">{row.qty}</td>
@@ -2740,12 +2881,12 @@ export default function App() {
           {/* Category Breakdown */}
           <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
             <h3 className="text-base md:text-lg font-bold mb-4 md:mb-6">Sales by Category</h3>
-            {categoryBreakdown.length === 0 ? (
+            {reportCategoryBreakdown.length === 0 ? (
               <p className="text-slate-400 text-sm text-center py-8">No sales recorded yet.</p>
             ) : (
               <div className="h-[220px] md:h-[250px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={categoryBreakdown}>
+                  <BarChart data={reportCategoryBreakdown}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                     <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
                     <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
@@ -2771,6 +2912,16 @@ export default function App() {
                 <option value="monthly">Monthly</option>
               </select>
             </div>
+            {reportRange === 'monthly' && (
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-400 uppercase">Month</label>
+                <select value={reportMonth} onChange={e => setReportMonth(e.target.value)} className="w-full sm:w-48 bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
+                  {availableReportMonths.map(month => (
+                    <option key={month.value} value={month.value}>{month.label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="space-y-1">
               <label className="text-xs font-bold text-slate-400 uppercase">Filter by Category</label>
               <select value={reportCategory} onChange={e => setReportCategory(e.target.value)} className="w-full sm:w-48 bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20 cursor-pointer">
@@ -3027,7 +3178,7 @@ export default function App() {
           <div className="bg-white p-4 md:p-6 rounded-xl md:rounded-2xl border border-slate-100 shadow-sm">
             <h3 className="text-base md:text-lg font-bold text-slate-900 mb-3 md:mb-4">Security & Backup</h3>
             <div className="space-y-3 md:space-y-4">
-              <button onClick={backupRecords} className="w-full flex items-center justify-between p-3 md:p-4 bg-slate-50 rounded-xl md:rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
+              <button onClick={() => requestProtectedExport('backup')} className="w-full flex items-center justify-between p-3 md:p-4 bg-slate-50 rounded-xl md:rounded-2xl hover:bg-slate-100 transition-all cursor-pointer">
                 <div className="flex items-center gap-3">
                   <Database size={18} className="text-orange-500" />
                   <div className="text-left">
@@ -3314,6 +3465,126 @@ export default function App() {
                 >
                   Done
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showRestoreConfirmModal && (
+          <div className="fixed inset-0 z-[115] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              className="bg-white w-full max-w-sm rounded-3xl shadow-2xl border border-slate-100 overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-xl font-bold text-slate-900">Restore System</h3>
+                <p className="text-sm text-slate-500 mt-2">
+                  This will restore all data from the latest backup. Unsaved changes may be lost.
+                </p>
+              </div>
+              <div className="p-5 bg-slate-50">
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowRestoreConfirmModal(false)}
+                    className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmRestoreSystem}
+                    className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 transition-all cursor-pointer"
+                  >
+                    Restore
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showRestoreSuccessModal && (
+          <div className="fixed inset-0 z-[115] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              className="bg-white w-full max-w-sm rounded-3xl shadow-2xl border border-slate-100 overflow-hidden"
+            >
+              <div className="p-8 text-center border-b border-slate-100">
+                <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <CheckCircle2 size={32} />
+                </div>
+                <h3 className="text-2xl font-bold text-slate-900">Restore Complete</h3>
+                <p className="text-sm text-slate-500 mt-2">System has been restored from the latest backup.</p>
+              </div>
+              <div className="p-6">
+                <button
+                  onClick={() => setShowRestoreSuccessModal(false)}
+                  className="w-full py-3 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-all cursor-pointer"
+                >
+                  Done
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showExportAuthModal && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              className="bg-white w-full max-w-sm rounded-3xl shadow-2xl border border-slate-100 overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="text-xl font-bold text-slate-900">Manager Password Required</h3>
+                <p className="text-sm text-slate-500 mt-2">
+                  Confirm your password to continue with {
+                    pendingExportAction === 'pdf' ? 'PDF export'
+                      : pendingExportAction === 'excel' ? 'Excel export'
+                        : 'backup export'
+                  }.
+                </p>
+              </div>
+              <div className="p-5 space-y-3 bg-slate-50">
+                <input
+                  type="password"
+                  value={exportAuthPassword}
+                  onChange={e => setExportAuthPassword(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && confirmProtectedExport()}
+                  placeholder="Enter your password"
+                  className="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+                />
+                {exportAuthError && <p className="text-xs text-rose-600 font-medium">{exportAuthError}</p>}
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => {
+                      setShowExportAuthModal(false);
+                      setPendingExportAction(null);
+                      setExportAuthPassword('');
+                      setExportAuthError('');
+                    }}
+                    className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold hover:bg-slate-50 transition-all cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmProtectedExport}
+                    disabled={isVerifyingExportAuth}
+                    className="flex-1 py-3 bg-orange-600 text-white rounded-xl text-sm font-bold hover:bg-orange-700 disabled:opacity-50 transition-all cursor-pointer"
+                  >
+                    {isVerifyingExportAuth ? 'Verifying...' : 'Continue'}
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>

@@ -74,7 +74,7 @@ export async function generateInsights(reportData: ReportData): Promise<string> 
   const avgItemsPerOrder = reportData.transactionCount > 0 ? unitCount / reportData.transactionCount : 0;
 
   const categoryText = reportData.categoryBreakdown.length
-    ? reportData.categoryBreakdown
+    ? [...reportData.categoryBreakdown]
       .sort((a, b) => b.revenue - a.revenue)
       .map((c, i) => `${i + 1}. ${titleCase(c.name)} (${formatPeso(c.revenue)})`)
       .join('\n')
